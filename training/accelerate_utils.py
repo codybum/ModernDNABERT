@@ -519,7 +519,6 @@ def train_with_accelerate(args):
     from transformers import BertForMaskedLM
     from torch.utils.data import DataLoader
 
-
     # Setup tokenizer
     tokenizer = setup_tokenizer(args, accelerator)
 
@@ -553,7 +552,11 @@ def train_with_accelerate(args):
         )
         model = create_genomic_bert_model(config)
 
-    # Check model and tokenizer compatibility
+    # CRITICAL FIX: Explicitly resize token embeddings after all model modifications
+    logger.info(f"Explicitly resizing token embeddings to match tokenizer size: {len(tokenizer)}")
+    model.resize_token_embeddings(len(tokenizer))
+
+    # Additional verification as backup
     model = verify_model_tokenizer_compatibility(model, tokenizer)
 
     # Prepare dataset
@@ -626,7 +629,6 @@ def train_with_accelerate(args):
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, lr_scheduler
     )
-
 
     test_lengths = [
         args.pre_training_length,
