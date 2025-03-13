@@ -268,18 +268,23 @@ def create_genomic_bert_config(
 
 def create_genomic_bert_model(config):
     """
-    Create a BERT model for genomic data with ALiBi.
+    Create a BERT model for genomic data with ALiBi that properly inherits from GenerationMixin.
 
     Args:
         config: BERT configuration
 
     Returns:
-        BertForMaskedLM: BERT model with ALiBi attention
+        BertForMaskedLM: BERT model with ALiBi attention and proper inheritance
     """
     from transformers import BertForMaskedLM
+    from transformers.generation.utils import GenerationMixin
+
+    # Define a custom class that inherits properly
+    class GenomicBertForMaskedLM(BertForMaskedLM, GenerationMixin):
+        pass
 
     logger.info(f"Initializing model with vocab_size: {config.vocab_size}")
-    model = BertForMaskedLM(config)
+    model = GenomicBertForMaskedLM(config)
 
     # Verify embedding size matches config vocab_size
     embedding_size = model.get_input_embeddings().weight.shape[0]
