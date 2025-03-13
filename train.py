@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """
-Main training script for genomic BERT with ALiBi attention.
+Main training script for genomic BERT with selectable attention mechanisms.
 
 This script uses PyTorch Accelerate to train a BERT model on genomic sequences
-with ALiBi attention for improved long-sequence handling.
+with support for different attention mechanisms including standard BERT attention
+and ALiBi attention for improved long-sequence handling.
 """
 
 import os
@@ -38,7 +39,7 @@ def main():
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
-        description="Train a BERT model with ALiBi for genomic sequences using Accelerate"
+        description="Train a BERT model for genomic sequences using Accelerate"
     )
 
     # Input/Output
@@ -82,6 +83,9 @@ def main():
                              help="Number of attention heads (default: 12)")
     model_group.add_argument("--dropout", type=float, default=0.1,
                              help="Dropout probability (default: 0.1)")
+    # Add attention type selection
+    model_group.add_argument("--attention_type", type=str, default="alibi", choices=["standard", "alibi"],
+                             help="Type of attention mechanism to use (default: alibi)")
 
     # Sequence length options
     seq_group = parser.add_argument_group("Sequence Options")

@@ -1,15 +1,15 @@
 """
-ALiBi Attention implementation for BERT models.
+Attention implementations for BERT models.
 
-This module provides a modified BERT self-attention mechanism that incorporates
-the Attention with Linear Biases (ALiBi) approach, which helps models extrapolate
-to longer sequence lengths than seen during training.
+This module provides various attention mechanisms for BERT models, including:
+1. Standard BERT self-attention
+2. ALiBi (Attention with Linear Biases) for extrapolation to longer sequences
 """
 
 import math
 import torch
 import logging
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Literal
 
 from transformers.models.bert.modeling_bert import BertSelfAttention
 
@@ -155,9 +155,75 @@ class BertSelfAttentionWithALiBi(BertSelfAttention):
         return outputs
 
 
+# We'll keep the standard BERT attention as is, since it's already implemented in transformers
+
+def modify_bert_attention(model, attention_type: Literal["standard", "alibi"]):
+    """
+    Modify a standard BERT model to use the specified attention type.
+
+    Args:
+        model: A BertForMaskedLM model instance
+        attention_type: The type of attention to use ("standard" or "alibi")
+
+    Returns:
+        The modified model with the requested attention type
+    """
+    # Verify the model config has necessary parameters
+    if not hasattr(model.config, 'num_attention_heads'):
+        raise ValueError("Model config missing 'num_attention_heads'")
+
+    logger.info(
+        f"Modifying BERT model to use {attention_type} attention with {model.config.num_attention_heads} attention heads")
+
+    # Set attention-specific configurations
+    model.config.attention_type = attention_type
+
+    if attention_type == "alibi":
+        # ALiBi-specific configuration
+        model.config.use_alibi = True
+        model.config.position_embedding_type = "alibi"
+
+        # Replace standard self-attention with ALiBi self-attention in each layer
+        for i, layer in enumerate(model.bert.encoder.layer):
+            old_attention = layer.attention.self
+
+            # Create new ALiBi attention
+            new_attention = BertSelfAttentionWithALiBi(model.config)
+
+            # Copy weights from old attention to new attention
+            new_attention.query = old_attention.query
+            new_attention.key = old_attention.key
+            new_attention.value = old_attention.value
+            new_attention.dropout = old_attention.dropout
+
+            # Replace the attention layer
+            layer.attention.self = new_attention
+
+            logger.info(f"Replaced attention in layer {i} with ALiBi attention")
+
+    elif attention_type == "standard":
+        # Standard attention configuration
+        model.config.use_alibi = False
+        model.config.position_embedding_type = "absolute"
+
+        # No need to replace anything as the model already uses standard attention
+        logger.info(f"Using standard BERT attention")
+
+    else:
+        raise ValueError(f"Unsupported attention type: {attention_type}")
+
+    # Ensure embeddings are properly sized
+    model.resize_token_embeddings(len(model.get_input_embeddings().weight))
+
+    logger.info(f"All layers successfully modified to use {attention_type} attention")
+    return model
+
+
+# Legacy function for backward compatibility
 def modify_bert_for_alibi(model):
     """
     Modify a standard BERT model to use ALiBi attention with improved safety checks.
+    This is a legacy function for backward compatibility.
 
     Args:
         model: A BertForMaskedLM model instance
@@ -165,37 +231,7 @@ def modify_bert_for_alibi(model):
     Returns:
         The modified model with ALiBi attention
     """
-    # Verify the model config has necessary parameters
-    if not hasattr(model.config, 'num_attention_heads'):
-        raise ValueError("Model config missing 'num_attention_heads'")
-
-    logger.info(f"Modifying BERT model to use ALiBi with {model.config.num_attention_heads} attention heads")
-
-    # Set ALiBi-specific configurations
-    model.config.use_alibi = True
-    model.config.position_embedding_type = "alibi"
-
-    # Replace standard self-attention with ALiBi self-attention in each layer
-    for i, layer in enumerate(model.bert.encoder.layer):
-        old_attention = layer.attention.self
-
-        # Create new ALiBi attention
-        new_attention = BertSelfAttentionWithALiBi(model.config)
-
-        # Copy weights from old attention to new attention
-        new_attention.query = old_attention.query
-        new_attention.key = old_attention.key
-        new_attention.value = old_attention.value
-        new_attention.dropout = old_attention.dropout
-
-        # Replace the attention layer
-        layer.attention.self = new_attention
-
-        logger.info(f"Replaced attention in layer {i} with ALiBi attention")
-        model.resize_token_embeddings(len(model.get_input_embeddings().weight))
-
-    logger.info("All layers successfully modified to use ALiBi attention")
-    return model
+    return modify_bert_attention(model, attention_type="alibi")
 
 
 def create_genomic_bert_config(
@@ -212,11 +248,11 @@ def create_genomic_bert_config(
         initializer_range=0.02,
         layer_norm_eps=1e-12,
         pad_token_id=0,
-        use_alibi=True,
+        attention_type="alibi",  # Added parameter for attention type
         max_supported_length=16384,
 ):
     """
-    Create a BERT config for genomic data with ALiBi support.
+    Create a BERT config for genomic data with customizable attention type.
 
     Args:
         vocab_size: Size of the vocabulary
@@ -232,7 +268,7 @@ def create_genomic_bert_config(
         initializer_range: Range for weight initialization
         layer_norm_eps: Epsilon for layer normalization
         pad_token_id: ID of the padding token
-        use_alibi: Whether to use ALiBi for position representation
+        attention_type: Type of attention to use ("standard" or "alibi")
         max_supported_length: Maximum sequence length supported by the model
 
     Returns:
@@ -256,9 +292,16 @@ def create_genomic_bert_config(
         pad_token_id=pad_token_id,
     )
 
-    # Add custom config for ALiBi
-    config.use_alibi = use_alibi
-    config.position_embedding_type = "alibi" if use_alibi else "absolute"
+    # Add custom config for attention type
+    config.attention_type = attention_type
+
+    # Add ALiBi-specific settings if needed
+    if attention_type == "alibi":
+        config.use_alibi = True
+        config.position_embedding_type = "alibi"
+    else:
+        config.use_alibi = False
+        config.position_embedding_type = "absolute"
 
     # Add max supported length to config
     config.max_supported_length = max_supported_length
@@ -268,13 +311,13 @@ def create_genomic_bert_config(
 
 def create_genomic_bert_model(config):
     """
-    Create a BERT model for genomic data with ALiBi that properly inherits from GenerationMixin.
+    Create a BERT model for genomic data with the specified attention type.
 
     Args:
         config: BERT configuration
 
     Returns:
-        BertForMaskedLM: BERT model with ALiBi attention and proper inheritance
+        BertForMaskedLM: BERT model with the specified attention type
     """
     from transformers import BertForMaskedLM
     from transformers.generation.utils import GenerationMixin
@@ -293,8 +336,9 @@ def create_genomic_bert_model(config):
         logger.info(f"Resizing token embeddings to {config.vocab_size}")
         model.resize_token_embeddings(config.vocab_size)
 
-    # Apply ALiBi if specified in config
-    if config.use_alibi:
-        model = modify_bert_for_alibi(model)
+    # Apply the specified attention type if needed
+    attention_type = getattr(config, 'attention_type', 'standard')
+    if attention_type != "standard":
+        model = modify_bert_attention(model, attention_type)
 
     return model
