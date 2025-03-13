@@ -37,17 +37,6 @@ def setup_accelerator(args):
     Returns:
         Accelerator: Configured accelerator instance
     """
-    # Configure logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO,
-    )
-
-    # Don't set CUDA_VISIBLE_DEVICES - let Accelerate handle device management
-    if "CUDA_VISIBLE_DEVICES" in os.environ and args.gpu_ids is not None:
-        logger.warning("Both CUDA_VISIBLE_DEVICES and --gpu_ids are set. Using CUDA_VISIBLE_DEVICES.")
-
     # Create checkpoint configuration
     project_config = None
     if args.output_dir:
@@ -69,10 +58,18 @@ def setup_accelerator(args):
     # Create accelerator
     accelerator = Accelerator(**accelerator_config)
 
-    # Set proper logging level based on process role
-    logger.setLevel(logging.INFO if accelerator.is_main_process else logging.WARNING)
+    # Configure logging once globally - force=True ensures this overrides any existing configuration
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO if accelerator.is_main_process else logging.WARNING,
+        force=True
+    )
 
-    # Log accelerator configuration on main process
+    # Initialize the logger
+    logger = logging.getLogger(__name__)
+
+    # Log accelerator configuration on main process only
     if accelerator.is_main_process:
         logger.info("-" * 50)
         logger.info("Accelerator Configuration:")
@@ -94,7 +91,6 @@ def setup_accelerator(args):
         logger.info("-" * 50)
 
     return accelerator
-
 
 def save_checkpoint(accelerator, args, epoch, step, model, optimizer, lr_scheduler, tokenizer):
     """
