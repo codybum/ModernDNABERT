@@ -192,6 +192,7 @@ def modify_bert_for_alibi(model):
         layer.attention.self = new_attention
 
         logger.info(f"Replaced attention in layer {i} with ALiBi attention")
+        model.resize_token_embeddings(len(model.get_input_embeddings().weight))
 
     logger.info("All layers successfully modified to use ALiBi attention")
     return model
