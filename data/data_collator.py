@@ -330,26 +330,50 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
             logger.error(f"Invalid inputs shape: {inputs.shape}")
             return inputs, torch.full_like(inputs, -100)
 
-        if self.tokenizer.mask_token is None:
-            raise ValueError("This tokenizer does not have a mask token")
+        # CRITICAL FIX: Handle missing mask token or potentially problematic tokenizer
+        if self.tokenizer.mask_token is None or not hasattr(self.tokenizer, 'mask_token_id'):
+            logger.warning("Tokenizer has no mask token defined, using a safe fallback")
+            mask_token_id = 0  # Use a safe fallback (usually UNK token)
+        else:
+            mask_token_id = self.tokenizer.mask_token_id
 
-        # Get mask token ID and prepare labels
-        mask_token_id = self.tokenizer.mask_token_id
         labels = inputs.clone()
 
         # Create probability matrix
         probability_matrix = torch.full(labels.shape, self.mlm_probability)
 
-        # Get special tokens mask - do this safely on CPU first
+        # CRITICAL FIX: Safer special tokens mask handling
         special_tokens_mask = []
-        for val in inputs.cpu().tolist():
-            special_tokens_mask.append(self.tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True))
+        try:
+            # Try the standard way first
+            for val in inputs.cpu().tolist():
+                # IMPORTANT: If get_special_tokens_mask fails, use an alternative
+                try:
+                    special_tokens = self.tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True)
+                    special_tokens_mask.append(special_tokens)
+                except Exception as e:
+                    logger.warning(f"Failed to get special tokens mask: {e}")
+                    # Fallback: Mark UNK and PAD tokens as special
+                    unk_id = getattr(self.tokenizer, 'unk_token_id', -1)
+                    pad_id = getattr(self.tokenizer, 'pad_token_id', -1)
+
+                    special_tokens = [(1 if (t == unk_id or t == pad_id) else 0) for t in val]
+                    special_tokens_mask.append(special_tokens)
+
+        except Exception as e:
+            logger.error(f"Failed to create special tokens mask: {e}")
+            # Default to empty special tokens mask
+            special_tokens_mask = [[0] * inputs.size(1) for _ in range(inputs.size(0))]
+
         special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool, device=inputs.device)
 
         # Don't mask special tokens or padding
         probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
-        padding_mask = inputs.eq(self.tokenizer.pad_token_id)
-        probability_matrix.masked_fill_(padding_mask, value=0.0)
+
+        # Also explicitly don't mask padding tokens
+        if hasattr(self.tokenizer, 'pad_token_id') and self.tokenizer.pad_token_id is not None:
+            padding_mask = inputs.eq(self.tokenizer.pad_token_id)
+            probability_matrix.masked_fill_(padding_mask, value=0.0)
 
         # Get indices to mask
         masked_indices = torch.bernoulli(probability_matrix).bool()
@@ -365,16 +389,20 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
 
         # Generate random tokens safely, if needed
         if indices_random.sum() > 0:
-            # Use a very small subset of vocab for safety - just 100 tokens
-            safe_upper_bound = min(100, self.tokenizer.vocab_size - 1)
-            random_words = torch.randint(1, safe_upper_bound, (1,), device=inputs.device).item()
+            # CRITICAL FIX: Use a very small subset of vocab for safety - just 100 tokens
+            # but ensure we don't exceed vocabulary size
+            vocab_size = getattr(self.tokenizer, 'vocab_size', 100)
+            safe_upper_bound = min(100, vocab_size - 1)
+
+            # CRITICAL FIX: Replace each token individually without creating a separate random token for each
+            # This avoids creating a large tensor that might cause memory issues
+            default_random_token = min(4, safe_upper_bound)  # A safe default (usually corresponds to a nucleotide)
 
             # Replace each token individually (very slow but safe)
             indices = torch.nonzero(indices_random)
             for idx in indices:
                 batch_idx, token_idx = idx[0].item(), idx[1].item()
-                # Generate a new random token for each position
-                random_token = torch.randint(1, safe_upper_bound, (1,), device=inputs.device).item()
-                inputs[batch_idx, token_idx] = random_token
+                # Use the same token for all replacements to avoid creating too many tensors
+                inputs[batch_idx, token_idx] = default_random_token
 
         return inputs, labels

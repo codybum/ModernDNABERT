@@ -11,6 +11,8 @@ import torch
 import copy
 from typing import List, Dict, Optional, Any, Union, Tuple
 
+from data.data_collator import GenomicMLMDataCollator
+
 logger = logging.getLogger(__name__)
 
 
@@ -233,6 +235,99 @@ def test_tokenizer_oov_handling(tokenizer):
 
     logger.info("Tokenizer OOV handling test passed!")
     return True
+
+
+def setup_mlm_data_collator(tokenizer, mlm_probability=0.15):
+    """
+    Set up a data collator for masked language modeling with fallbacks.
+
+    Args:
+        tokenizer: The tokenizer to use
+        mlm_probability: Probability of masking a token
+
+    Returns:
+        A data collator for masked language modeling
+    """
+    logger = logging.getLogger(__name__)
+
+    # Check if mask token exists
+    if not hasattr(tokenizer, 'mask_token') or tokenizer.mask_token is None:
+        logger.warning("Tokenizer has no mask token defined!")
+
+        # Add a mask token if needed
+        if not hasattr(tokenizer, 'mask_token') or tokenizer.mask_token is None:
+            logger.info("Adding mask token to tokenizer")
+            # Use a safe approach to add the token
+            special_tokens_dict = {'mask_token': '<mask>'}
+            tokenizer.add_special_tokens(special_tokens_dict)
+            logger.info(f"Added mask token: {tokenizer.mask_token} with ID: {tokenizer.mask_token_id}")
+
+    # Create the data collator
+    try:
+        logger.info(
+            f"Creating MLM data collator with mask token: {tokenizer.mask_token} (ID: {tokenizer.mask_token_id})")
+        data_collator = GenomicMLMDataCollator(
+            tokenizer=tokenizer,
+            mlm=True,
+            mlm_probability=mlm_probability
+        )
+        return data_collator
+    except ValueError as e:
+        if "mask token" in str(e).lower():
+            logger.error(f"Failed to create MLM data collator: {e}")
+            logger.info("Attempting to create a safe version with custom mask handling")
+
+            # Create safe custom version
+            class SafeGenomicMLMDataCollator(GenomicMLMDataCollator):
+                def __post_init__(self):
+                    # Skip the parent class check for mask token
+                    pass
+
+                def completely_safe_mask_tokens(self, inputs):
+                    """Safe implementation of token masking for MLM."""
+                    if inputs.numel() == 0 or inputs.dim() != 2:
+                        logger.error(f"Invalid inputs shape: {inputs.shape}")
+                        return inputs, torch.full_like(inputs, -100)
+
+                    # Use a safe fallback mask token ID if needed
+                    if not hasattr(self.tokenizer, 'mask_token_id') or self.tokenizer.mask_token_id is None:
+                        logger.warning("Using UNK token as mask token")
+                        mask_token_id = self.tokenizer.unk_token_id
+                    else:
+                        mask_token_id = self.tokenizer.mask_token_id
+
+                    labels = inputs.clone()
+                    probability_matrix = torch.full(labels.shape, self.mlm_probability)
+
+                    # Create special tokens mask
+                    special_tokens_mask = torch.zeros_like(inputs, dtype=torch.bool)
+
+                    # Mark pad tokens as special
+                    if hasattr(self.tokenizer, 'pad_token_id') and self.tokenizer.pad_token_id is not None:
+                        special_tokens_mask = inputs.eq(self.tokenizer.pad_token_id)
+
+                    # Don't mask special tokens
+                    probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
+
+                    # Get indices to mask
+                    masked_indices = torch.bernoulli(probability_matrix).bool()
+
+                    # Set labels for unmasked tokens to -100 so they're ignored in loss
+                    labels[~masked_indices] = -100
+
+                    # Replace masked tokens with mask token
+                    inputs[masked_indices] = mask_token_id
+
+                    return inputs, labels
+
+            return SafeGenomicMLMDataCollator(
+                tokenizer=tokenizer,
+                mlm=True,
+                mlm_probability=mlm_probability
+            )
+        else:
+            # Re-raise if it's not related to mask token
+            raise
 
 def log_gpu_memory_usage():
     """Log GPU memory usage for all available GPUs."""

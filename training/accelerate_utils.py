@@ -293,14 +293,14 @@ def save_model(accelerator, model, tokenizer, output_dir):
 def verify_model_tokenizer_compatibility(model, tokenizer):
     """
     Verify that model and tokenizer have compatible vocabulary sizes.
-    Resizes model embeddings if necessary.
+    Ensures special tokens are properly synchronized.
 
     Args:
         model: The model to verify
         tokenizer: The tokenizer to verify
 
     Returns:
-        The model with potentially resized embeddings
+        The model with properly resized embeddings
     """
     tokenizer_vocab_size = tokenizer.vocab_size
     model_vocab_size = model.config.vocab_size
@@ -311,32 +311,50 @@ def verify_model_tokenizer_compatibility(model, tokenizer):
     logger.info(f"  Model config vocab size: {model_vocab_size}")
     logger.info(f"  Model embedding size: {embedding_size}")
 
-    # Check tokenizer and model config
-    if tokenizer_vocab_size != model_vocab_size:
-        logger.warning(f"Tokenizer vocab size ({tokenizer_vocab_size}) doesn't match model config ({model_vocab_size})")
+    # Add special tokens to the model config
+    special_tokens = {}
+    for name in ['mask_token', 'pad_token', 'unk_token']:
+        if hasattr(tokenizer, name) and getattr(tokenizer, name) is not None:
+            token = getattr(tokenizer, name)
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            special_tokens[name] = token
+            special_tokens[f"{name}_id"] = token_id
+            logger.info(f"  {name}: '{token}' -> ID: {token_id}")
 
-        # Attempt to fix by resizing embeddings
+    # Add special token information to model config
+    for key, value in special_tokens.items():
+        setattr(model.config, key, value)
+
+    # Check tokenizer and model config
+    if tokenizer_vocab_size != model_vocab_size or tokenizer_vocab_size != embedding_size:
+        logger.warning(
+            f"Vocab size mismatch: Tokenizer={tokenizer_vocab_size}, Model config={model_vocab_size}, Embeddings={embedding_size}")
+
+        # Resize embeddings to match tokenizer
         logger.info(f"Resizing model embeddings to match tokenizer vocab size: {tokenizer_vocab_size}")
         model.resize_token_embeddings(tokenizer_vocab_size)
 
-        # Check if fix worked
+        # Check if resize worked
         new_embedding_size = model.get_input_embeddings().weight.shape[0]
         if new_embedding_size != tokenizer_vocab_size:
-            raise ValueError(
-                f"Failed to resize embeddings. Tokenizer: {tokenizer_vocab_size}, "
-                f"Model: {new_embedding_size}"
-            )
+            logger.error(f"Failed to resize embeddings. Tokenizer: {tokenizer_vocab_size}, Model: {new_embedding_size}")
+            # Try again with an explicit new instance
+            model.resize_token_embeddings(tokenizer_vocab_size)
+            new_embedding_size = model.get_input_embeddings().weight.shape[0]
+            if new_embedding_size != tokenizer_vocab_size:
+                raise ValueError(
+                    f"Failed to resize embeddings after multiple attempts. "
+                    f"Tokenizer: {tokenizer_vocab_size}, Model: {new_embedding_size}"
+                )
         else:
             logger.info(f"Successfully resized embeddings to {new_embedding_size}")
 
-    # Final check of embedding size
-    if embedding_size != tokenizer_vocab_size:
-        logger.warning(f"Model embedding size ({embedding_size}) doesn't match tokenizer ({tokenizer_vocab_size})")
-        logger.info(f"Resizing token embeddings to match tokenizer: {tokenizer_vocab_size}")
-        model.resize_token_embeddings(tokenizer_vocab_size)
+    # Ensure mask token ID is properly set in model config
+    if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
+        model.config.mask_token_id = tokenizer.mask_token_id
+        logger.info(f"Set mask_token_id in model config to {model.config.mask_token_id}")
 
     return model
-
 
 def safe_training_step(model, batch, accelerator, args):
     """
@@ -552,11 +570,7 @@ def train_with_accelerate(args):
         )
         model = create_genomic_bert_model(config)
 
-    # CRITICAL FIX: Explicitly resize token embeddings after all model modifications
-    logger.info(f"Explicitly resizing token embeddings to match tokenizer size: {len(tokenizer)}")
-    model.resize_token_embeddings(len(tokenizer))
-
-    # Additional verification as backup
+    # CRITICAL FIX: Verify and synchronize model-tokenizer compatibility
     model = verify_model_tokenizer_compatibility(model, tokenizer)
 
     # Prepare dataset
@@ -572,10 +586,10 @@ def train_with_accelerate(args):
         max_safe_sequence_length=args.max_safe_sequence_length,
     )
 
-    # Data collator for masked language modeling
-    data_collator = GenomicMLMDataCollator(
+    # CRITICAL FIX: Use our setup function for the data collator
+    from training.train_utils import setup_mlm_data_collator
+    data_collator = setup_mlm_data_collator(
         tokenizer=tokenizer,
-        mlm=True,
         mlm_probability=args.mlm_probability
     )
 

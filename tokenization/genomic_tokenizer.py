@@ -370,11 +370,7 @@ def create_genomic_tokenizer_from_model(model_path, **kwargs):
 
 def setup_tokenizer(args, accelerator):
     """
-    Set up tokenizer with improved reuse logic:
-    1. Try to load from provided tokenizer_path
-    2. Try to load from output_dir/tokenizer
-    3. Try to load SentencePiece model directly
-    4. Only train a new tokenizer if nothing exists
+    Set up tokenizer with improved reuse logic and proper special token handling.
     """
     import os
     import logging
@@ -396,8 +392,12 @@ def setup_tokenizer(args, accelerator):
     if args.tokenizer_path and os.path.exists(args.tokenizer_path):
         logger.info(f"Loading tokenizer from user-provided path: {args.tokenizer_path}")
         try:
+            # Load tokenizer normally but ensure special tokens are properly configured
             tokenizer = GenomicTokenizer.from_pretrained(args.tokenizer_path)
             logger.info(f"Successfully loaded tokenizer with vocab size: {tokenizer.vocab_size}")
+
+            # Ensure mask token exists and is properly defined
+            _ensure_special_tokens(tokenizer)
             return tokenizer
         except Exception as e:
             logger.warning(f"Failed to load tokenizer from {args.tokenizer_path}: {e}")
@@ -409,6 +409,9 @@ def setup_tokenizer(args, accelerator):
         try:
             tokenizer = GenomicTokenizer.from_pretrained(output_tokenizer_dir)
             logger.info(f"Successfully loaded saved tokenizer with vocab size: {tokenizer.vocab_size}")
+
+            # Ensure mask token exists and is properly defined
+            _ensure_special_tokens(tokenizer)
             return tokenizer
         except Exception as e:
             logger.warning(f"Failed to load saved tokenizer: {e}")
@@ -419,8 +422,19 @@ def setup_tokenizer(args, accelerator):
         if os.path.exists(spm_path):
             logger.info(f"Trying to load SentencePiece model directly: {spm_path}")
             try:
-                tokenizer = GenomicTokenizer(sentencepiece_model_file=spm_path)
+                # Create tokenizer with necessary special tokens
+                tokenizer = GenomicTokenizer(
+                    sentencepiece_model_file=spm_path,
+                    # Include all necessary special tokens
+                    unk_token="<unk>",
+                    pad_token="<pad>",
+                    mask_token="<mask>"
+                )
+
                 logger.info(f"Successfully loaded SentencePiece model with vocab size: {tokenizer.vocab_size}")
+
+                # Ensure mask token exists and is properly defined
+                _ensure_special_tokens(tokenizer)
 
                 # Save in standard format for future runs
                 if accelerator.is_main_process:
@@ -452,8 +466,16 @@ def setup_tokenizer(args, accelerator):
                 args.vocab_size
             )
 
-            # Initialize tokenizer with the new implementation
-            tokenizer = GenomicTokenizer(sentencepiece_model_file=model_file)
+            # Initialize tokenizer with required special tokens
+            tokenizer = GenomicTokenizer(
+                sentencepiece_model_file=model_file,
+                unk_token="<unk>",
+                pad_token="<pad>",
+                mask_token="<mask>"
+            )
+
+            # Ensure mask token exists and is properly defined
+            _ensure_special_tokens(tokenizer)
 
             # Save the tokenizer to the specified path
             tokenizer.save_pretrained(output_tokenizer_dir)
@@ -470,11 +492,72 @@ def setup_tokenizer(args, accelerator):
         logger.info(f"Loading tokenizer from {output_tokenizer_dir}")
         try:
             tokenizer = GenomicTokenizer.from_pretrained(output_tokenizer_dir)
+            # Ensure mask token exists and is properly defined
+            _ensure_special_tokens(tokenizer)
         except Exception as e:
             raise RuntimeError(f"Failed to load created tokenizer: {str(e)}")
 
     # Verify tokenizer is properly loaded on all processes
     vocab_size = tokenizer.vocab_size
     logger.info(f"Tokenizer ready with vocabulary size: {vocab_size}")
+
+    # Log special tokens map for debugging
+    logger.info("Special tokens configuration:")
+    if hasattr(tokenizer, 'special_tokens_map'):
+        for name, token in tokenizer.special_tokens_map.items():
+            if token is not None:
+                token_id = tokenizer.convert_tokens_to_ids(token) if token else None
+                logger.info(f"  {name}: {token} -> ID: {token_id}")
+
+    return tokenizer
+
+
+def _ensure_special_tokens(tokenizer):
+    """
+    Ensure tokenizer has proper special tokens with valid IDs.
+    """
+    logger = logging.getLogger(__name__)
+
+    # Add missing special tokens if needed
+    tokens_to_add = []
+
+    # Ensure mask token exists for MLM
+    if not hasattr(tokenizer, 'mask_token') or tokenizer.mask_token is None:
+        logger.warning("Mask token missing, adding it")
+        tokens_to_add.append("<mask>")
+        tokenizer.mask_token = "<mask>"
+
+    # Ensure pad token exists
+    if not hasattr(tokenizer, 'pad_token') or tokenizer.pad_token is None:
+        logger.warning("Pad token missing, adding it")
+        tokens_to_add.append("<pad>")
+        tokenizer.pad_token = "<pad>"
+
+    # Ensure unk token exists
+    if not hasattr(tokenizer, 'unk_token') or tokenizer.unk_token is None:
+        logger.warning("UNK token missing, adding it")
+        tokens_to_add.append("<unk>")
+        tokenizer.unk_token = "<unk>"
+
+    # Add any missing tokens
+    if tokens_to_add:
+        # Verify tokens are in vocabulary or add them
+        for token in tokens_to_add:
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            if token_id == tokenizer.unk_token_id:
+                logger.warning(f"Token {token} not in vocabulary, will add it")
+
+        # Add special tokens explicitly to ensure they have unique IDs
+        num_added = tokenizer.add_special_tokens({
+            'mask_token': tokenizer.mask_token,
+            'pad_token': tokenizer.pad_token,
+            'unk_token': tokenizer.unk_token,
+        })
+
+        logger.info(f"Added {num_added} special tokens to the tokenizer")
+
+    # Verify the mask token has a valid ID
+    mask_token_id = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
+    logger.info(f"Verified mask token '{tokenizer.mask_token}' has ID: {mask_token_id}")
 
     return tokenizer
