@@ -19,6 +19,11 @@ from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration
 from tqdm import tqdm
 
+from data.data_collator import GenomicDataset, GenomicMLMDataCollator
+from modeling.alibi_attention import create_genomic_bert_config, modify_bert_for_alibi, create_genomic_bert_model
+from tokenization.genomic_tokenizer import setup_tokenizer
+from training.train_utils import generate_test_sequences, test_sequence_length_extrapolation
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,7 +82,6 @@ def setup_accelerator(args):
         logger.info(f"  Distributed type: {accelerator.distributed_type}")
         logger.info(f"  Mixed precision: {accelerator.mixed_precision}")
         logger.info(f"  Device: {accelerator.device}")
-        logger.info(f"  CPU only: {accelerator.cpu}")
 
         # Log GPU info if available
         if torch.cuda.is_available():
@@ -520,12 +524,6 @@ def train_with_accelerate(args):
     from transformers import BertForMaskedLM
     from torch.utils.data import DataLoader
 
-    # Import your custom modules
-    from genomic_bert.tokenization.genomic_tokenizer import setup_tokenizer
-    from genomic_bert.modeling.alibi_attention import create_genomic_bert_config, create_genomic_bert_model, \
-        modify_bert_for_alibi
-    from genomic_bert.data.genomic_dataset import GenomicDataset
-    from genomic_bert.data.data_collator import GenomicMLMDataCollator
 
     # Setup tokenizer
     tokenizer = setup_tokenizer(args, accelerator)
@@ -625,8 +623,6 @@ def train_with_accelerate(args):
         model, optimizer, train_dataloader, lr_scheduler
     )
 
-    # Generate test sequences for extrapolation testing
-    from genomic_bert.training.train_utils import generate_test_sequences, test_sequence_length_extrapolation
 
     test_lengths = [
         args.pre_training_length,
