@@ -12,6 +12,8 @@ import logging
 import torch
 from accelerate.utils import set_seed
 
+from training.accelerate_utils import train_with_accelerate
+
 # Configure logging
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -168,8 +170,6 @@ def main():
         set_seed(args.seed)
         logger.info(f"Random seed set to {args.seed}")
 
-    # Import here to avoid circular imports
-    from genomic_bert.training.train import train_with_accelerate
 
     # Start training with Accelerate
     train_with_accelerate(args)
