@@ -445,7 +445,7 @@ def _process_in_micro_batches(model, batch, accelerator, args, micro_batch_size=
     if full_batch_size <= micro_batch_size:
         raise ValueError("Batch size is already at minimum, cannot process in micro-batches")
 
-    # Initialize accumulated loss
+    # Initialize accumulated loss using accelerator's device
     accumulated_loss = torch.tensor(0.0, device=accelerator.device)
 
     # Process each micro-batch
@@ -463,7 +463,7 @@ def _process_in_micro_batches(model, batch, accelerator, args, micro_batch_size=
             outputs = model(**micro_batch)
             micro_loss = outputs.loss / args.gradient_accumulation_steps / (full_batch_size / micro_batch_size)
 
-        # Backward pass
+        # Backward pass - use accelerator
         accelerator.backward(micro_loss)
 
         # Add to accumulated loss
@@ -471,7 +471,6 @@ def _process_in_micro_batches(model, batch, accelerator, args, micro_batch_size=
 
     # Return average loss
     return accumulated_loss / full_batch_size
-
 
 def calculate_training_steps(train_dataloader, gradient_accumulation_steps, num_epochs):
     """

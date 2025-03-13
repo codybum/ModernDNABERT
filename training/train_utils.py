@@ -171,7 +171,7 @@ def get_optimal_batch_size(seq_length, available_memory_gb, base_batch_size=16):
     return memory_adjusted
 
 
-def calculate_perplexity(model, tokenizer, texts, device):
+def calculate_perplexity(model, tokenizer, texts, accelerator):
     """
     Calculate perplexity on a set of texts.
 
@@ -179,7 +179,7 @@ def calculate_perplexity(model, tokenizer, texts, device):
         model: Model to evaluate
         tokenizer: Tokenizer to use
         texts: List of texts to evaluate
-        device: Device to run evaluation on
+        accelerator: Accelerator instance for device management
 
     Returns:
         Perplexity value
@@ -191,7 +191,7 @@ def calculate_perplexity(model, tokenizer, texts, device):
     with torch.no_grad():
         for text in texts:
             # Tokenize text
-            encodings = tokenizer(text, return_tensors="pt").to(device)
+            encodings = tokenizer(text, return_tensors="pt").to(accelerator.device)
 
             # Create labels for loss calculation
             labels = encodings.input_ids.clone()
@@ -209,7 +209,6 @@ def calculate_perplexity(model, tokenizer, texts, device):
     perplexity = torch.exp(torch.tensor(avg_loss))
 
     return perplexity.item()
-
 
 def log_gpu_memory_usage():
     """Log GPU memory usage for all available GPUs."""
