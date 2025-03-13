@@ -236,7 +236,7 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
 
     def __call__(self, examples):
         """
-        Create batches with consistent dimensions.
+        Create batches with consistent dimensions and ensure all token IDs are in valid range.
 
         Args:
             examples: List of examples
@@ -259,11 +259,20 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
             "token_type_ids": [],
         }
 
+        # Get vocabulary size for validation
+        vocab_size = self.tokenizer.vocab_size
+
         # Process each example with explicit dimension control
         pad_token_id = self.tokenizer.pad_token_id
         for example in examples:
             input_ids = example["input_ids"]
             attention_mask = example["attention_mask"]
+
+            # Validate input_ids are within vocab size range
+            if input_ids.max() >= vocab_size:
+                logger.warning(f"Found token ID {input_ids.max().item()} exceeding vocab size {vocab_size}")
+                # Clip token IDs to valid range (0 to vocab_size-1)
+                input_ids = torch.clamp(input_ids, 0, vocab_size - 1)
 
             # Hard truncation for safety
             if len(input_ids) > max_length:
@@ -291,6 +300,7 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
 
             # Verification check
             assert len(input_ids) == max_length, f"Expected length {max_length}, got {len(input_ids)}"
+            assert input_ids.max() < vocab_size, f"Token ID {input_ids.max().item()} exceeds vocab size {vocab_size}"
 
             batch["input_ids"].append(input_ids)
             batch["attention_mask"].append(attention_mask)
