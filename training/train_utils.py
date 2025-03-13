@@ -210,6 +210,30 @@ def calculate_perplexity(model, tokenizer, texts, accelerator):
 
     return perplexity.item()
 
+
+def test_tokenizer_oov_handling(tokenizer):
+    """Test that the tokenizer properly handles OOV tokens."""
+    logger.info("Testing tokenizer OOV handling...")
+
+    # Get max valid token ID
+    max_valid_id = tokenizer.vocab_size - 1
+
+    # Test normal tokens
+    for base in ['A', 'T', 'G', 'C']:
+        token_id = tokenizer._convert_token_to_id(base)
+        logger.info(f"Token: {base}, ID: {token_id}")
+        assert token_id <= max_valid_id, f"Token ID {token_id} exceeds max valid ID {max_valid_id}"
+
+    # Test likely OOV tokens (unusual sequences)
+    unusual_tokens = ['ZZZZZ', 'NNNNN', 'XXXXX']
+    for token in unusual_tokens:
+        token_id = tokenizer._convert_token_to_id(token)
+        logger.info(f"OOV Token: {token}, ID: {token_id}")
+        assert token_id == tokenizer.unk_token_id, f"OOV token '{token}' did not map to unk_token_id"
+
+    logger.info("Tokenizer OOV handling test passed!")
+    return True
+
 def log_gpu_memory_usage():
     """Log GPU memory usage for all available GPUs."""
     if not torch.cuda.is_available():

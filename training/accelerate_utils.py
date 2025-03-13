@@ -527,6 +527,15 @@ def train_with_accelerate(args):
     # Setup tokenizer
     tokenizer = setup_tokenizer(args, accelerator)
 
+    # Add this right after:
+    if accelerator.is_main_process:
+        from training.train_utils import test_tokenizer_oov_handling
+        try:
+            test_tokenizer_oov_handling(tokenizer)
+        except Exception as e:
+            logger.error(f"Tokenizer test failed: {e}")
+            logger.error("This indicates potential problems with token ID handling")
+
     # Setup model
     if args.model_path and os.path.exists(args.model_path):
         logger.info(f"Loading existing model from {args.model_path}")
