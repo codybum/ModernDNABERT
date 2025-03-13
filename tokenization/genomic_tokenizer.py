@@ -120,12 +120,27 @@ class GenomicTokenizer(PreTrainedTokenizer):
             return []
 
     def _convert_token_to_id(self, token):
-        """Convert token to id using SentencePiece model"""
-        if hasattr(self, "sp_model"):
-            return self.sp_model.PieceToId(token)
-        else:
+        """Convert token to id using SentencePiece model with proper OOV handling.
+
+        Args:
+            token: The token to convert
+
+        Returns:
+            int: The token ID, or unk_token_id if token is out of vocabulary
+        """
+        if not hasattr(self, "sp_model"):
             logger.error("SentencePiece model not initialized")
-            return 0  # unk_token_id
+            return self.unk_token_id
+
+        # Get the token ID from SentencePiece
+        token_id = self.sp_model.PieceToId(token)
+
+        # SentencePiece returns -1 for unknown tokens or may return IDs beyond vocab size
+        if token_id == -1 or token_id >= self.sp_model.GetPieceSize():
+            logger.debug(f"OOV token encountered: '{token}', mapping to unk_token_id")
+            return self.unk_token_id
+
+        return token_id
 
     def _convert_id_to_token(self, index):
         """Convert id to token using SentencePiece model"""
