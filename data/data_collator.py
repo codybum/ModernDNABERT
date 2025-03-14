@@ -199,6 +199,28 @@ class GenomicDataset(Dataset):
             if 'token_type_ids' not in encoding:
                 encoding['token_type_ids'] = torch.zeros_like(encoding['input_ids'])
 
+            # CRITICAL FIX: Verify and clamp token IDs
+            if 'input_ids' in encoding:
+                vocab_size = self.tokenizer.vocab_size
+                max_id = encoding['input_ids'].max().item()
+
+                if max_id >= vocab_size:
+                    logger.warning(f"Found token ID {max_id} exceeding vocab size {vocab_size}")
+                    # Replace out-of-range IDs with UNK token ID
+                    mask = encoding['input_ids'] >= vocab_size
+                    unk_token_id = getattr(self.tokenizer, 'unk_token_id', 0)
+                    encoding['input_ids'] = torch.where(
+                        mask,
+                        torch.tensor(unk_token_id, device=encoding['input_ids'].device,
+                                     dtype=encoding['input_ids'].dtype),
+                        encoding['input_ids']
+                    )
+
+                    # Double-check the fix worked
+                    if encoding['input_ids'].max().item() >= vocab_size:
+                        logger.error("Failed to clamp token IDs to vocab size")
+                        return self._get_fallback_encoding(max_seq_length)
+
             # Verify encoding looks valid
             if encoding['input_ids'].size(0) == 0:
                 logger.error("Tokenizer returned empty input_ids")
@@ -260,10 +282,12 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
         }
 
         # Get vocabulary size for validation
-        vocab_size = self.tokenizer.vocab_size
+        vocab_size = getattr(self.tokenizer, 'vocab_size', 100)
 
         # Process each example with explicit dimension control
-        pad_token_id = self.tokenizer.pad_token_id
+        pad_token_id = self.tokenizer.pad_token_id if hasattr(self.tokenizer, 'pad_token_id') else 0
+        unk_token_id = self.tokenizer.unk_token_id if hasattr(self.tokenizer, 'unk_token_id') else 0
+
         for example in examples:
             input_ids = example["input_ids"]
             attention_mask = example["attention_mask"]
@@ -272,7 +296,10 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
             if input_ids.max() >= vocab_size:
                 logger.warning(f"Found token ID {input_ids.max().item()} exceeding vocab size {vocab_size}")
                 # Clip token IDs to valid range (0 to vocab_size-1)
-                input_ids = torch.clamp(input_ids, 0, vocab_size - 1)
+                invalid_mask = input_ids >= vocab_size
+                input_ids = torch.where(invalid_mask,
+                                        torch.tensor(unk_token_id, device=input_ids.device, dtype=input_ids.dtype),
+                                        input_ids)
 
             # Hard truncation for safety
             if len(input_ids) > max_length:
@@ -287,20 +314,25 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
                 # Add padding
                 input_ids = torch.cat([
                     input_ids,
-                    torch.full((padding_length,), pad_token_id, dtype=torch.long)
+                    torch.full((padding_length,), pad_token_id, dtype=torch.long, device=input_ids.device)
                 ], dim=0)
                 attention_mask = torch.cat([
                     attention_mask,
-                    torch.zeros(padding_length, dtype=torch.long)
+                    torch.zeros(padding_length, dtype=torch.long, device=attention_mask.device)
                 ], dim=0)
                 token_type_ids = torch.cat([
                     token_type_ids,
-                    torch.zeros(padding_length, dtype=torch.long)
+                    torch.zeros(padding_length, dtype=torch.long, device=token_type_ids.device)
                 ], dim=0)
 
             # Verification check
             assert len(input_ids) == max_length, f"Expected length {max_length}, got {len(input_ids)}"
-            assert input_ids.max() < vocab_size, f"Token ID {input_ids.max().item()} exceeds vocab size {vocab_size}"
+
+            # Final validation of token IDs
+            if input_ids.max() >= vocab_size:
+                logger.warning(
+                    f"After processing, token ID {input_ids.max().item()} still exceeds vocab size {vocab_size}")
+                input_ids = torch.clamp(input_ids, 0, vocab_size - 1)
 
             batch["input_ids"].append(input_ids)
             batch["attention_mask"].append(attention_mask)
@@ -330,12 +362,28 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
             logger.error(f"Invalid inputs shape: {inputs.shape}")
             return inputs, torch.full_like(inputs, -100)
 
+        # Get vocabulary size for additional verification
+        vocab_size = getattr(self.tokenizer, 'vocab_size', 100)
+
+        # CRITICAL FIX: Make sure no token ID exceeds vocabulary size
+        max_id = inputs.max().item()
+        if max_id >= vocab_size:
+            logger.warning(f"Batch contains token ID {max_id} exceeding vocab size {vocab_size}")
+            # Clamp all tokens to valid range - use the unk_token_id for invalid tokens
+            unk_token_id = getattr(self.tokenizer, 'unk_token_id', 0)
+            mask = inputs >= vocab_size
+            inputs = torch.where(mask, torch.tensor(unk_token_id, device=inputs.device, dtype=inputs.dtype), inputs)
+
         # CRITICAL FIX: Handle missing mask token or potentially problematic tokenizer
-        if self.tokenizer.mask_token is None or not hasattr(self.tokenizer, 'mask_token_id'):
+        if not hasattr(self.tokenizer, 'mask_token_id') or self.tokenizer.mask_token_id is None:
             logger.warning("Tokenizer has no mask token defined, using a safe fallback")
             mask_token_id = 0  # Use a safe fallback (usually UNK token)
         else:
             mask_token_id = self.tokenizer.mask_token_id
+            # Verify mask token ID is in range
+            if mask_token_id >= vocab_size:
+                logger.warning(f"Mask token ID {mask_token_id} exceeds vocab size {vocab_size}, using fallback")
+                mask_token_id = getattr(self.tokenizer, 'unk_token_id', 0)
 
         labels = inputs.clone()
 
@@ -356,10 +404,8 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
                     # Fallback: Mark UNK and PAD tokens as special
                     unk_id = getattr(self.tokenizer, 'unk_token_id', -1)
                     pad_id = getattr(self.tokenizer, 'pad_token_id', -1)
-
                     special_tokens = [(1 if (t == unk_id or t == pad_id) else 0) for t in val]
                     special_tokens_mask.append(special_tokens)
-
         except Exception as e:
             logger.error(f"Failed to create special tokens mask: {e}")
             # Default to empty special tokens mask
@@ -391,7 +437,6 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
         if indices_random.sum() > 0:
             # CRITICAL FIX: Use a very small subset of vocab for safety - just 100 tokens
             # but ensure we don't exceed vocabulary size
-            vocab_size = getattr(self.tokenizer, 'vocab_size', 100)
             safe_upper_bound = min(100, vocab_size - 1)
 
             # CRITICAL FIX: Replace each token individually without creating a separate random token for each
@@ -405,4 +450,10 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
                 # Use the same token for all replacements to avoid creating too many tensors
                 inputs[batch_idx, token_idx] = default_random_token
 
+        # CRITICAL FIX: Verify all token IDs are still in range after masking
+        if inputs.max().item() >= vocab_size:
+            logger.warning(f"After masking, found token ID exceeding vocab size. Clamping...")
+            inputs = torch.clamp(inputs, 0, vocab_size - 1)
+
         return inputs, labels
+

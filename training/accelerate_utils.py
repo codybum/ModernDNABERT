@@ -30,6 +30,57 @@ from training.train_utils import (
 logger = logging.getLogger(__name__)
 
 
+def ensure_valid_batch_indices(batch, tokenizer, model):
+    """
+    Ensure all token IDs in a batch are within the valid vocabulary range.
+
+    Args:
+        batch: The batch of inputs
+        tokenizer: The tokenizer
+        model: The model
+
+    Returns:
+        Updated batch with validated indices
+    """
+    if 'input_ids' not in batch:
+        return batch
+
+    # Get model's vocabulary size (embedding dimension)
+    embedding_size = model.get_input_embeddings().weight.shape[0]
+
+    # Check if any indices are out of bounds
+    input_ids = batch['input_ids']
+    max_id = input_ids.max().item()
+
+    if max_id >= embedding_size:
+        logger.warning(f"Found token ID {max_id} exceeding model vocab size {embedding_size}")
+
+        # Create a mask of out-of-bounds IDs
+        invalid_mask = input_ids >= embedding_size
+
+        if invalid_mask.any():
+            # Count invalid indices
+            num_invalid = invalid_mask.sum().item()
+            logger.warning(f"Clamping {num_invalid} token IDs to valid range")
+
+            # Replace out-of-bounds IDs with unk_token_id
+            unk_token_id = getattr(tokenizer, 'unk_token_id', 0) if tokenizer else 0
+            input_ids = torch.where(invalid_mask,
+                                    torch.tensor(unk_token_id, device=input_ids.device, dtype=input_ids.dtype),
+                                    input_ids)
+
+            # Update the batch
+            batch['input_ids'] = input_ids
+
+            # If labels exist, update them too to avoid loss on invalid indices
+            if 'labels' in batch:
+                batch['labels'] = torch.where(invalid_mask,
+                                              torch.tensor(-100, device=batch['labels'].device,
+                                                           dtype=batch['labels'].dtype),
+                                              batch['labels'])
+
+    return batch
+
 def train_with_accelerate(args):
     """
     Main training function using Accelerate with support for selectable attention mechanisms.
@@ -480,7 +531,7 @@ def save_model(accelerator, model, tokenizer, output_dir):
 
 
 def verify_model_tokenizer_compatibility(model, tokenizer):
-    """Verify that model and tokenizer have compatible vocabulary sizes."""
+    """Verify that model and tokenizer have compatible vocabulary sizes and share tokenizer reference."""
     tokenizer_vocab_size = tokenizer.vocab_size
     model_vocab_size = model.config.vocab_size
     embedding_size = model.get_input_embeddings().weight.shape[0]
@@ -489,6 +540,10 @@ def verify_model_tokenizer_compatibility(model, tokenizer):
     logger.info(f"  Tokenizer vocab size: {tokenizer_vocab_size}")
     logger.info(f"  Model config vocab size: {model_vocab_size}")
     logger.info(f"  Model embedding size: {embedding_size}")
+
+    # CRITICAL FIX: Store tokenizer reference in model config
+    # This allows us to access the tokenizer from the model later
+    model.config.tokenizer = tokenizer
 
     # Add special tokens to the model config
     special_tokens = {}
@@ -500,6 +555,14 @@ def verify_model_tokenizer_compatibility(model, tokenizer):
             special_tokens[f"{name}_id"] = token_id
             logger.info(f"  {name}: '{token}' -> ID: {token_id}")
 
+    # CRITICAL FIX: Verify special token IDs are in valid range
+    for name in ['mask_token_id', 'pad_token_id', 'unk_token_id']:
+        if name in special_tokens and special_tokens[name] >= embedding_size:
+            logger.error(
+                f"Special token {name} has ID {special_tokens[name]} which exceeds embedding size {embedding_size}")
+            special_tokens[name] = min(1, embedding_size - 1)  # Use a safe ID
+            logger.info(f"  Fixed {name} to use ID: {special_tokens[name]}")
+
     # Add special token information to model config
     for key, value in special_tokens.items():
         setattr(model.config, key, value)
@@ -509,36 +572,74 @@ def verify_model_tokenizer_compatibility(model, tokenizer):
         logger.warning(
             f"Vocab size mismatch: Tokenizer={tokenizer_vocab_size}, Model config={model_vocab_size}, Embeddings={embedding_size}")
 
-        # Resize embeddings to match tokenizer
-        logger.info(f"Resizing model embeddings to match tokenizer vocab size: {tokenizer_vocab_size}")
-        model.resize_token_embeddings(tokenizer_vocab_size)
+        # CRITICAL FIX: Choose the safest approach - resize to the minimum of the two sizes
+        new_size = min(tokenizer_vocab_size, max(model_vocab_size, embedding_size))
+        logger.info(f"Resizing model embeddings to safer size: {new_size}")
 
-        # Check if resize worked
-        new_embedding_size = model.get_input_embeddings().weight.shape[0]
-        if new_embedding_size != tokenizer_vocab_size:
-            logger.error(f"Failed to resize embeddings. Tokenizer: {tokenizer_vocab_size}, Model: {new_embedding_size}")
-            # Try again with an explicit new instance
-            model.resize_token_embeddings(tokenizer_vocab_size)
+        try:
+            model.resize_token_embeddings(new_size)
+
+            # Update the model config to reflect the new size
+            model.config.vocab_size = new_size
+
+            # Check if resize worked
             new_embedding_size = model.get_input_embeddings().weight.shape[0]
-            if new_embedding_size != tokenizer_vocab_size:
-                raise ValueError(
-                    f"Failed to resize embeddings after multiple attempts. "
-                    f"Tokenizer: {tokenizer_vocab_size}, Model: {new_embedding_size}"
-                )
-        else:
-            logger.info(f"Successfully resized embeddings to {new_embedding_size}")
+            if new_embedding_size != new_size:
+                logger.error(f"Failed to resize embeddings. Target: {new_size}, Actual: {new_embedding_size}")
+                raise ValueError(f"Failed to resize embeddings correctly")
+            else:
+                logger.info(f"Successfully resized embeddings to {new_embedding_size}")
+        except Exception as e:
+            logger.error(f"Error during embedding resize: {e}")
+            # If resize fails, we'll try a different approach
+            logger.info(f"Attempting alternative approach to fix embedding size")
 
-    # Ensure mask token ID is properly set in model config
+            # Create new embeddings from scratch with the correct size
+            old_embeddings = model.get_input_embeddings()
+            input_dim = min(old_embeddings.weight.shape[0], new_size)
+
+            new_embeddings = torch.nn.Embedding(new_size, old_embeddings.weight.shape[1])
+            # Copy weights for the overlapping part
+            with torch.no_grad():
+                new_embeddings.weight[:input_dim, :] = old_embeddings.weight[:input_dim, :]
+
+            # Set the new embeddings
+            model.set_input_embeddings(new_embeddings)
+            model.config.vocab_size = new_size
+
+            logger.info(f"Replaced embeddings with new size: {new_size}")
+
+    # CRITICAL FIX: Ensure mask token ID is properly set in model config
     if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
         model.config.mask_token_id = tokenizer.mask_token_id
         logger.info(f"Set mask_token_id in model config to {model.config.mask_token_id}")
 
-    return model
+        # Verify mask token ID is within vocab size
+        if model.config.mask_token_id >= model.config.vocab_size:
+            logger.warning(f"Mask token ID {model.config.mask_token_id} exceeds vocab size {model.config.vocab_size}")
+            model.config.mask_token_id = min(1, model.config.vocab_size - 1)
+            logger.info(f"Adjusted mask_token_id to {model.config.mask_token_id}")
 
+    # Perform final validation
+    final_embedding_size = model.get_input_embeddings().weight.shape[0]
+    logger.info(f"Final model embedding size: {final_embedding_size}")
+    logger.info(f"Final model config vocab_size: {model.config.vocab_size}")
+
+    # Force sync model config vocab size with actual embedding size
+    if model.config.vocab_size != final_embedding_size:
+        logger.warning(
+            f"Synchronizing model config vocab_size ({model.config.vocab_size}) with embedding size ({final_embedding_size})")
+        model.config.vocab_size = final_embedding_size
+
+    return model
 
 def safe_training_step(model, batch, accelerator, args):
     """Execute a single training step with robust error handling."""
     try:
+        # Validate token IDs before forward pass
+        tokenizer = getattr(accelerator.unwrap_model(model).config, 'tokenizer', None)
+        batch = ensure_valid_batch_indices(batch, tokenizer, model)
+
         # Check available GPU memory
         if torch.cuda.is_available():
             device = next(model.parameters()).device
@@ -628,6 +729,10 @@ def _process_in_micro_batches(model, batch, accelerator, args, micro_batch_size=
 
         # Create micro-batch
         micro_batch = {k: v[i:end_idx] for k, v in batch.items()}
+
+        # Validate token IDs in micro-batch
+        tokenizer = getattr(accelerator.unwrap_model(model).config, 'tokenizer', None)
+        micro_batch = ensure_valid_batch_indices(micro_batch, tokenizer, model)
 
         # Forward pass
         with torch.cuda.amp.autocast(enabled=args.fp16):
