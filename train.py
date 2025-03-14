@@ -101,10 +101,10 @@ def main():
                            help="Stride for overlapping chunks (default: 1000)")
     seq_group.add_argument("--sample_long_sequences", action="store_true",
                            help="Include longer sequences during training to help with extrapolation")
-    seq_group.add_argument("--max_safe_sequence_length", type=int, default=50000,
-                           help="Maximum safe sequence length for processing (default: 50000)")
-    seq_group.add_argument("--max_supported_model_length", type=int, default=16384,
-                           help="Maximum sequence length the model should support (default: 16384)")
+    seq_group.add_argument("--max_safe_sequence_length", type=int, default=100000,
+                           help="Maximum safe sequence length for processing (default: 100000)")
+    seq_group.add_argument("--max_supported_model_length", type=int, default=131072,
+                           help="Maximum sequence length the model should support (default: 131072)")
 
     # Training options
     training_group = parser.add_argument_group("Training Options")
