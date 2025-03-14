@@ -1,6 +1,6 @@
 """
-Drop-in replacement for the train_with_accelerate function in training/accelerate_utils.py
-that supports selectable attention mechanisms.
+Modified version of training/accelerate_utils.py that supports loading
+pre-trained tokenizers instead of training them.
 """
 
 import os
@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from data.data_collator import GenomicDataset, GenomicMLMDataCollator
 from modeling.alibi_attention import create_genomic_bert_config, create_genomic_bert_model
-from tokenization.genomic_tokenizer import setup_tokenizer
+from tokenization.genomic_tokenizer import GenomicTokenizer
 from training.train_utils import (
     generate_test_sequences,
     test_sequence_length_extrapolation,
@@ -42,6 +42,7 @@ def ensure_valid_batch_indices(batch, tokenizer, model):
     Returns:
         Updated batch with validated indices
     """
+    # Original function code unchanged
     if 'input_ids' not in batch:
         return batch
 
@@ -95,6 +96,7 @@ def modify_bert_attention(model, attention_type):
     """
     from modeling.alibi_attention import modify_bert_for_alibi
 
+    # Original function code unchanged
     # Get current attention type (if set)
     current_attention_type = getattr(model.config, 'attention_type', 'standard')
 
@@ -148,18 +150,17 @@ def modify_bert_attention(model, attention_type):
     else:
         raise ValueError(f"Unsupported attention type: {attention_type}")
 
+
 def train_with_accelerate(args, accelerator):
     """
     Main training function using Accelerate with support for selectable attention mechanisms.
 
+    Modified to load pre-trained tokenizer instead of training it.
+
     Args:
         args: Command-line arguments
+        accelerator: Accelerator instance
     """
-    # Use the setup function to initialize accelerator
-    #accelerator = setup_accelerator(args)
-
-    # Get the correct device from accelerator
-    #device = accelerator.device
     logger = logging.getLogger(__name__)
 
     # Set random seed for reproducibility
@@ -174,16 +175,52 @@ def train_with_accelerate(args, accelerator):
     # Wait for all processes to sync
     accelerator.wait_for_everyone()
 
-    # Setup tokenizer
-    tokenizer = setup_tokenizer(args, accelerator)
+    # Load pre-trained tokenizer
+    logger.info(f"Loading pre-trained tokenizer from {args.tokenizer_path}")
+    try:
+        tokenizer = GenomicTokenizer.from_pretrained(args.tokenizer_path)
 
-    # Test tokenizer OOV handling
-    if accelerator.is_main_process:
-        try:
-            test_tokenizer_oov_handling(tokenizer)
-        except Exception as e:
-            logger.error(f"Tokenizer test failed: {e}")
-            logger.error("This indicates potential problems with token ID handling")
+        # Ensure special tokens are properly defined
+        def _ensure_special_tokens(tokenizer):
+            # Get vocabulary size for validation
+            vocab_size = tokenizer.vocab_size
+
+            # Fix mask_token_id directly if it exceeds vocab size
+            if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
+                if tokenizer.mask_token_id >= vocab_size:
+                    # Use a fixed safe ID
+                    safe_id = 1  # Use a simple, safe ID within vocab range
+
+                    # Store the original token text
+                    mask_token_text = tokenizer.mask_token
+
+                    # Update the tokenizer's internal mappings
+                    tokenizer.mask_token_id = safe_id
+
+                    # Update the special tokens dictionary if it exists
+                    if hasattr(tokenizer, 'special_tokens_map'):
+                        tokenizer.special_tokens_map['mask_token'] = mask_token_text
+
+                    # Make sure the vocab knows about this mapping
+                    if hasattr(tokenizer, 'added_tokens_encoder'):
+                        tokenizer.added_tokens_encoder[mask_token_text] = safe_id
+                    if hasattr(tokenizer, 'added_tokens_decoder'):
+                        tokenizer.added_tokens_decoder[safe_id] = mask_token_text
+
+                    logger.info(f"Fixed mask_token to use ID {safe_id} instead of {tokenizer.mask_token_id}")
+
+        _ensure_special_tokens(tokenizer)
+
+        # Test tokenizer OOV handling
+        if accelerator.is_main_process:
+            try:
+                test_tokenizer_oov_handling(tokenizer)
+            except Exception as e:
+                logger.error(f"Tokenizer test failed: {e}")
+                logger.error("This indicates potential problems with token ID handling")
+
+    except Exception as e:
+        raise ValueError(f"Failed to load tokenizer from {args.tokenizer_path}: {e}")
 
     # Setup model with the specified attention type
     if args.model_path and os.path.exists(args.model_path):
@@ -335,19 +372,6 @@ def train_with_accelerate(args, accelerator):
 
         # Process batches with improved error handling
         for step, batch in enumerate(train_dataloader):
-            # Special handling for first few batches in first epoch
-            '''
-            if epoch == 0 and step < 5:
-                logger.info(f"Carefully processing batch {step} in first epoch")
-                # Extra safety for first batches - limit sequence length
-                if 'input_ids' in batch:
-                    seq_length = batch['input_ids'].size(1)
-                    logger.info(f"  Sequence length: {seq_length}")
-                    if seq_length > 512:  # Be very conservative initially
-                        logger.warning(f"  First batch has long sequences ({seq_length}). Truncating to 512.")
-                        batch = {k: v[:, :512] if v.dim() > 1 else v for k, v in batch.items()}
-            '''
-
             # Process batch safely
             loss = safe_training_step(model, batch, accelerator, args)
 
@@ -411,8 +435,7 @@ def train_with_accelerate(args, accelerator):
     logger.info("Training complete!")
 
 
-# Helper functions (these would normally be imported from accelerate_utils.py)
-# In training/accelerate_utils.py, modify setup_accelerator
+# The rest of the helper functions remain unchanged from the original file
 def setup_accelerator(args):
     # Create checkpoint configuration
     project_config = None
@@ -442,6 +465,7 @@ def setup_accelerator(args):
     accelerator = Accelerator(**accelerator_config)
 
     return accelerator
+
 
 def calculate_training_steps(train_dataloader, gradient_accumulation_steps, num_epochs):
     """Calculate the number of update steps for training."""
@@ -602,7 +626,6 @@ def save_model(accelerator, model, tokenizer, output_dir):
     accelerator.wait_for_everyone()
 
 
-# In training/accelerate_utils.py, ensure model and tokenizer are compatible
 def verify_model_tokenizer_compatibility(model, tokenizer):
     # First, fix any token ID issues in the tokenizer
     if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
@@ -622,6 +645,7 @@ def verify_model_tokenizer_compatibility(model, tokenizer):
         logger.error(f"Failed to resize model embeddings to {new_size}")
 
     return model
+
 
 def safe_training_step(model, batch, accelerator, args):
     """Execute a single training step with robust error handling."""
@@ -650,8 +674,6 @@ def safe_training_step(model, batch, accelerator, args):
                     logger.warning(
                         f"Sequence length {seq_length} with low memory ({available_gb:.2f} GB). Processing in micro-batches.")
                     return _process_in_micro_batches(model, batch, accelerator, args)
-                #else:
-                #    logger.info(f"Processing long sequence batch (length: {seq_length})")
 
         # Forward pass
         outputs = model(**batch)

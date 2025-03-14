@@ -22,9 +22,6 @@ def main():
     """
     Parse arguments and start training with Accelerate.
     """
-
-
-
     # Auto-detect CUDA devices and configure environment
     if torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
@@ -45,8 +42,8 @@ def main():
                           help="Input genomic sequence files (FASTA format)")
     io_group.add_argument("--output_dir", required=True,
                           help="Output directory for model, tokenizer, and logs")
-    io_group.add_argument("--tokenizer_path", default=None,
-                          help="Path to existing tokenizer (optional)")
+    io_group.add_argument("--tokenizer_path", required=True,
+                          help="Path to pre-trained tokenizer directory (required)")
     io_group.add_argument("--model_path", default=None,
                           help="Path to existing model checkpoint (optional)")
     io_group.add_argument("--resume_from_checkpoint", type=str, default=None,
@@ -60,13 +57,6 @@ def main():
                            help="Force GPU usage even if distributed mode is active")
     gpu_group.add_argument("--gpu_ids", type=str, default=None,
                            help="Comma-separated list of GPU IDs to use (defaults to all available)")
-
-    # Tokenizer options
-    tokenizer_group = parser.add_argument_group("Tokenizer Options")
-    tokenizer_group.add_argument("--vocab_size", type=int, default=4096,
-                                 help="Vocabulary size for BPE tokenizer (default: 4096)")
-    tokenizer_group.add_argument("--tokenizer_sample_size", type=int, default=100000,
-                                 help="Number of sequences to sample for tokenizer training")
 
     # Model architecture
     model_group = parser.add_argument_group("Model Architecture")
@@ -187,6 +177,10 @@ def main():
         set_seed(args.seed)
         logger.info(f"Random seed set to {args.seed}")
 
+    # Verify that tokenizer exists
+    if not os.path.exists(args.tokenizer_path):
+        raise ValueError(f"Tokenizer path '{args.tokenizer_path}' does not exist. "
+                         f"Please run train_tokenizer.py first to create the tokenizer.")
 
     # Start training with Accelerate
     train_with_accelerate(args, accelerator)
