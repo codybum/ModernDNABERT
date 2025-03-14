@@ -374,16 +374,20 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
             mask = inputs >= vocab_size
             inputs = torch.where(mask, torch.tensor(unk_token_id, device=inputs.device, dtype=inputs.dtype), inputs)
 
-        # CRITICAL FIX: Handle missing mask token or potentially problematic tokenizer
-        if not hasattr(self.tokenizer, 'mask_token_id') or self.tokenizer.mask_token_id is None:
-            logger.warning("Tokenizer has no mask token defined, using a safe fallback")
-            mask_token_id = 0  # Use a safe fallback (usually UNK token)
-        else:
+        # CRITICAL FIX: Get mask token ID with better fallback handling
+        # First check if we have a model reference with the correct mask token ID
+        if hasattr(self, 'model') and hasattr(self.model.config, 'mask_token_id'):
+            mask_token_id = self.model.config.mask_token_id
+        elif hasattr(self.tokenizer, 'mask_token_id') and self.tokenizer.mask_token_id is not None:
             mask_token_id = self.tokenizer.mask_token_id
-            # Verify mask token ID is in range
-            if mask_token_id >= vocab_size:
-                logger.warning(f"Mask token ID {mask_token_id} exceeds vocab size {vocab_size}, using fallback")
-                mask_token_id = getattr(self.tokenizer, 'unk_token_id', 0)
+        else:
+            logger.warning("No valid mask token ID found, using a safe fallback")
+            mask_token_id = 1  # Use a safe fallback (usually special token)
+
+        # Verify mask token ID is in range
+        if mask_token_id >= vocab_size:
+            logger.warning(f"Mask token ID {mask_token_id} exceeds vocab size {vocab_size}, using fallback")
+            mask_token_id = getattr(self.tokenizer, 'unk_token_id', 0)
 
         labels = inputs.clone()
 
@@ -456,4 +460,3 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
             inputs = torch.clamp(inputs, 0, vocab_size - 1)
 
         return inputs, labels
-

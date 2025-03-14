@@ -18,7 +18,7 @@ from accelerate.utils import ProjectConfiguration
 from tqdm import tqdm
 
 from data.data_collator import GenomicDataset, GenomicMLMDataCollator
-from modeling.alibi_attention import create_genomic_bert_config, create_genomic_bert_model, modify_bert_attention
+from modeling.alibi_attention import create_genomic_bert_config, create_genomic_bert_model
 from tokenization.genomic_tokenizer import setup_tokenizer
 from training.train_utils import (
     generate_test_sequences,
@@ -158,10 +158,10 @@ def train_with_accelerate(args):
         max_safe_sequence_length=args.max_safe_sequence_length,
     )
 
-    # CRITICAL FIX: Use our setup function for the data collator
     data_collator = setup_mlm_data_collator(
         tokenizer=tokenizer,
-        mlm_probability=args.mlm_probability
+        mlm_probability=args.mlm_probability,
+        model=model  # Pass model reference to access config.mask_token_id
     )
 
     # Configure data loader
@@ -540,6 +540,7 @@ def save_model(accelerator, model, tokenizer, output_dir):
     # Wait for saving to complete
     accelerator.wait_for_everyone()
 
+
 def verify_model_tokenizer_compatibility(model, tokenizer):
     """Verify that model and tokenizer have compatible vocabulary sizes and share tokenizer reference."""
     tokenizer_vocab_size = tokenizer.vocab_size
@@ -570,8 +571,16 @@ def verify_model_tokenizer_compatibility(model, tokenizer):
         if name in special_tokens and special_tokens[name] >= embedding_size:
             logger.error(
                 f"Special token {name} has ID {special_tokens[name]} which exceeds embedding size {embedding_size}")
-            special_tokens[name] = min(1, embedding_size - 1)  # Use a safe ID
-            logger.info(f"  Fixed {name} to use ID: {special_tokens[name]}")
+            safe_id = min(1, embedding_size - 1)  # Use a safe ID
+            special_tokens[name] = safe_id
+            logger.info(f"  Fixed {name} to use ID: {safe_id}")
+
+            # Update tokenizer's special token ID as well if possible
+            token_name = name.replace('_id', '')
+            if hasattr(tokenizer, name):
+                old_id = getattr(tokenizer, name)
+                setattr(tokenizer, name, safe_id)
+                logger.info(f"  Updated {name} in tokenizer from {old_id} to {safe_id}")
 
     # Add special token information to model config
     for key, value in special_tokens.items():
@@ -619,16 +628,31 @@ def verify_model_tokenizer_compatibility(model, tokenizer):
 
             logger.info(f"Replaced embeddings with new size: {new_size}")
 
-    # CRITICAL FIX: Ensure mask token ID is properly set in model config
+    # CRITICAL FIX: Ensure mask token ID is properly set in model config AND is consistent
     if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
-        model.config.mask_token_id = tokenizer.mask_token_id
-        logger.info(f"Set mask_token_id in model config to {model.config.mask_token_id}")
+        mask_token_id = tokenizer.mask_token_id
 
         # Verify mask token ID is within vocab size
-        if model.config.mask_token_id >= model.config.vocab_size:
-            logger.warning(f"Mask token ID {model.config.mask_token_id} exceeds vocab size {model.config.vocab_size}")
-            model.config.mask_token_id = min(1, model.config.vocab_size - 1)
-            logger.info(f"Adjusted mask_token_id to {model.config.mask_token_id}")
+        if mask_token_id >= model.config.vocab_size:
+            logger.warning(f"Mask token ID {mask_token_id} exceeds vocab size {model.config.vocab_size}")
+
+            # Use a fixed ID that's safe and consistent everywhere
+            safe_mask_id = min(1, model.config.vocab_size - 1)
+
+            # Update both tokenizer and model consistently
+            model.config.mask_token_id = safe_mask_id
+
+            # Try to update the tokenizer's mask token ID as well if possible
+            if hasattr(tokenizer, 'mask_token_id'):
+                old_id = tokenizer.mask_token_id
+                tokenizer.mask_token_id = safe_mask_id
+                logger.info(f"Updated mask_token_id in tokenizer from {old_id} to {safe_mask_id}")
+
+            logger.info(f"Set mask_token_id consistently to {safe_mask_id} in model config and tokenizer")
+        else:
+            # Ensure the model config has the same value as the tokenizer
+            model.config.mask_token_id = mask_token_id
+            logger.info(f"Set mask_token_id in model config to {mask_token_id} (matching tokenizer)")
 
     # Perform final validation
     final_embedding_size = model.get_input_embeddings().weight.shape[0]

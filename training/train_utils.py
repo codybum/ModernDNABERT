@@ -272,13 +272,14 @@ def test_tokenizer_oov_handling(tokenizer):
     return True
 
 
-def setup_mlm_data_collator(tokenizer, mlm_probability=0.15):
+def setup_mlm_data_collator(tokenizer, mlm_probability=0.15, model=None):
     """
     Set up a data collator for masked language modeling with fallbacks.
 
     Args:
         tokenizer: The tokenizer to use
         mlm_probability: Probability of masking a token
+        model: Optional model reference to access its config for mask_token_id
 
     Returns:
         A data collator for masked language modeling
@@ -297,6 +298,19 @@ def setup_mlm_data_collator(tokenizer, mlm_probability=0.15):
             tokenizer.add_special_tokens(special_tokens_dict)
             logger.info(f"Added mask token: {tokenizer.mask_token} with ID: {tokenizer.mask_token_id}")
 
+    # Ensure mask token ID is valid
+    if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
+        vocab_size = tokenizer.vocab_size
+        if tokenizer.mask_token_id >= vocab_size:
+            logger.warning(f"Mask token ID {tokenizer.mask_token_id} exceeds vocab size {vocab_size}")
+            safe_id = min(1, vocab_size - 1)
+            logger.info(f"Using safer mask token ID: {safe_id}")
+            # Try to update tokenizer's mask_token_id if possible
+            if hasattr(tokenizer, 'mask_token_id'):
+                old_id = tokenizer.mask_token_id
+                tokenizer.mask_token_id = safe_id
+                logger.info(f"Updated mask_token_id in tokenizer from {old_id} to {safe_id}")
+
     # Create the data collator
     try:
         logger.info(
@@ -306,6 +320,11 @@ def setup_mlm_data_collator(tokenizer, mlm_probability=0.15):
             mlm=True,
             mlm_probability=mlm_probability
         )
+
+        # Store model reference for access to config.mask_token_id
+        if model is not None:
+            data_collator.model = model
+
         return data_collator
     except ValueError as e:
         if "mask token" in str(e).lower():
@@ -324,14 +343,25 @@ def setup_mlm_data_collator(tokenizer, mlm_probability=0.15):
                         logger.error(f"Invalid inputs shape: {inputs.shape}")
                         return inputs, torch.full_like(inputs, -100)
 
-                    # Use a safe fallback mask token ID if needed
-                    if not hasattr(self.tokenizer, 'mask_token_id') or self.tokenizer.mask_token_id is None:
-                        logger.warning("Using UNK token as mask token")
-                        mask_token_id = self.tokenizer.unk_token_id
-                    else:
+                    # Get vocabulary size for verification
+                    vocab_size = getattr(self.tokenizer, 'vocab_size', 100)
+
+                    # Use model's mask token ID if available, otherwise fall back
+                    if hasattr(self, 'model') and hasattr(self.model.config, 'mask_token_id'):
+                        mask_token_id = self.model.config.mask_token_id
+                    elif hasattr(self.tokenizer, 'mask_token_id') and self.tokenizer.mask_token_id is not None:
                         mask_token_id = self.tokenizer.mask_token_id
+                    else:
+                        mask_token_id = 1  # Safe default
+
+                    # Ensure ID is in range
+                    if mask_token_id >= vocab_size:
+                        logger.warning(f"Mask token ID {mask_token_id} exceeds vocab size {vocab_size}")
+                        mask_token_id = min(1, vocab_size - 1)  # Use safer ID
 
                     labels = inputs.clone()
+
+                    # Create probability matrix
                     probability_matrix = torch.full(labels.shape, self.mlm_probability)
 
                     # Create special tokens mask
@@ -355,11 +385,17 @@ def setup_mlm_data_collator(tokenizer, mlm_probability=0.15):
 
                     return inputs, labels
 
-            return SafeGenomicMLMDataCollator(
+            collator = SafeGenomicMLMDataCollator(
                 tokenizer=tokenizer,
                 mlm=True,
                 mlm_probability=mlm_probability
             )
+
+            # Store model reference
+            if model is not None:
+                collator.model = model
+
+            return collator
         else:
             # Re-raise if it's not related to mask token
             raise

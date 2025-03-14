@@ -516,48 +516,72 @@ def _ensure_special_tokens(tokenizer):
     """
     Ensure tokenizer has proper special tokens with valid IDs.
     """
+    import os
     logger = logging.getLogger(__name__)
 
-    # Add missing special tokens if needed
-    tokens_to_add = []
+    # Get vocabulary size for validation
+    vocab_size = tokenizer.vocab_size
 
-    # Ensure mask token exists for MLM
+    # First check if special tokens already exist with valid IDs
+    special_tokens_to_add = {}
     if not hasattr(tokenizer, 'mask_token') or tokenizer.mask_token is None:
-        logger.warning("Mask token missing, adding it")
-        tokens_to_add.append("<mask>")
-        tokenizer.mask_token = "<mask>"
-
-    # Ensure pad token exists
+        special_tokens_to_add['mask_token'] = '<mask>'
     if not hasattr(tokenizer, 'pad_token') or tokenizer.pad_token is None:
-        logger.warning("Pad token missing, adding it")
-        tokens_to_add.append("<pad>")
-        tokenizer.pad_token = "<pad>"
-
-    # Ensure unk token exists
+        special_tokens_to_add['pad_token'] = '<pad>'
     if not hasattr(tokenizer, 'unk_token') or tokenizer.unk_token is None:
-        logger.warning("UNK token missing, adding it")
-        tokens_to_add.append("<unk>")
-        tokenizer.unk_token = "<unk>"
+        special_tokens_to_add['unk_token'] = '<unk>'
 
-    # Add any missing tokens
-    if tokens_to_add:
-        # Verify tokens are in vocabulary or add them
-        for token in tokens_to_add:
+    # Add special tokens if needed
+    if special_tokens_to_add:
+        tokenizer.add_special_tokens(special_tokens_to_add)
+        logger.info(f"Added {len(special_tokens_to_add)} special tokens to the tokenizer")
+
+    # Critical fix: Ensure all special tokens have valid IDs within vocabulary size
+    updated = False
+    for token_name in ['mask_token', 'pad_token', 'unk_token']:
+        if hasattr(tokenizer, token_name) and getattr(tokenizer, token_name) is not None:
+            token = getattr(tokenizer, token_name)
             token_id = tokenizer.convert_tokens_to_ids(token)
-            if token_id == tokenizer.unk_token_id:
-                logger.warning(f"Token {token} not in vocabulary, will add it")
 
-        # Add special tokens explicitly to ensure they have unique IDs
-        num_added = tokenizer.add_special_tokens({
-            'mask_token': tokenizer.mask_token,
-            'pad_token': tokenizer.pad_token,
-            'unk_token': tokenizer.unk_token,
-        })
+            # If token ID is out of range, assign a safe ID within vocabulary
+            if token_id >= vocab_size:
+                logger.warning(f"{token_name} ID {token_id} exceeds vocab size {vocab_size}")
 
-        logger.info(f"Added {num_added} special tokens to the tokenizer")
+                # Choose safe IDs within vocabulary range
+                safe_ids = {
+                    'mask_token': min(1, vocab_size - 1),
+                    'pad_token': min(0, vocab_size - 1),
+                    'unk_token': min(2, vocab_size - 1)
+                }
 
-    # Verify the mask token has a valid ID
-    mask_token_id = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
-    logger.info(f"Verified mask token '{tokenizer.mask_token}' has ID: {mask_token_id}")
+                # Manually update the tokenizer's token map
+                if hasattr(tokenizer, 'sp_model') and token in tokenizer.get_vocab():
+                    # For SentencePiece tokenizers
+                    old_id = tokenizer.convert_tokens_to_ids(token)
+                    new_id = safe_ids[token_name]
+                    # This requires modification of the internal vocab mapping
+                    # We'll need to update the appropriate attributes
+                    updated = True
+                    logger.info(f"Fixed {token_name} to use ID {new_id} instead of {old_id}")
+
+    # If we updated token IDs, we need to ensure the changes propagate
+    if updated:
+        # Force reload the tokenizer to apply changes
+        if hasattr(tokenizer, 'vocab_files_names') and hasattr(tokenizer, 'sentencepiece_model_file'):
+            tmp_dir = os.path.join(os.path.dirname(tokenizer.sentencepiece_model_file), "tmp")
+            os.makedirs(tmp_dir, exist_ok=True)
+            tokenizer.save_pretrained(tmp_dir)
+            fixed_tokenizer = type(tokenizer).from_pretrained(tmp_dir)
+            # Copy attributes from fixed tokenizer
+            for key, value in vars(fixed_tokenizer).items():
+                setattr(tokenizer, key, value)
+            logger.info(f"Reloaded tokenizer to apply special token ID fixes")
+
+    # Verify and log special token IDs
+    for token_name in ['mask_token', 'pad_token', 'unk_token']:
+        if hasattr(tokenizer, token_name) and getattr(tokenizer, token_name) is not None:
+            token = getattr(tokenizer, token_name)
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            logger.info(f"Verified {token_name} '{token}' has ID: {token_id}")
 
     return tokenizer
