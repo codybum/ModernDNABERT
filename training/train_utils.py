@@ -272,7 +272,7 @@ def test_tokenizer_oov_handling(tokenizer):
     return True
 
 
-def setup_mlm_data_collator(tokenizer, mlm_probability=0.15, model=None):
+def setup_mlm_data_collator(tokenizer, mlm_probability=0.15, model=None, max_seq_length=512):
     """
     Set up a data collator for masked language modeling with fallbacks.
 
@@ -314,18 +314,22 @@ def setup_mlm_data_collator(tokenizer, mlm_probability=0.15, model=None):
     # Create the data collator
     try:
         logger.info(
-            f"Creating MLM data collator with mask token: {tokenizer.mask_token} (ID: {tokenizer.mask_token_id})")
+            f"Creating MLM data collator with mask token: {tokenizer.mask_token} "
+            f"(ID: {tokenizer.mask_token_id}), max_seq_length: {max_seq_length}")
+
         data_collator = GenomicMLMDataCollator(
             tokenizer=tokenizer,
             mlm=True,
-            mlm_probability=mlm_probability
+            mlm_probability=mlm_probability,
+            max_seq_length=max_seq_length  # Pass max_seq_length parameter
         )
 
-        # Store model reference for access to config.mask_token_id
+        # Store model reference
         if model is not None:
             data_collator.model = model
 
         return data_collator
+
     except ValueError as e:
         if "mask token" in str(e).lower():
             logger.error(f"Failed to create MLM data collator: {e}")
@@ -388,7 +392,8 @@ def setup_mlm_data_collator(tokenizer, mlm_probability=0.15, model=None):
             collator = SafeGenomicMLMDataCollator(
                 tokenizer=tokenizer,
                 mlm=True,
-                mlm_probability=mlm_probability
+                mlm_probability=mlm_probability,
+                max_seq_length=max_seq_length  # Pass max_seq_length here too
             )
 
             # Store model reference

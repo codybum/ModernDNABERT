@@ -256,19 +256,20 @@ class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
     and ensures proper token_type_ids.
     """
 
+    def __init__(self, tokenizer, mlm=True, mlm_probability=0.15, max_seq_length=512, model=None):
+        """Initialize with max_seq_length parameter"""
+        super().__init__(tokenizer=tokenizer, mlm=mlm, mlm_probability=mlm_probability)
+        self.max_seq_length = max_seq_length
+        self.model = model  # Store model reference
+
     def __call__(self, examples):
         """
         Create batches with consistent dimensions and ensure all token IDs are in valid range.
-
-        Args:
-            examples: List of examples
-
-        Returns:
-            Batch with masked tokens
         """
         # Check and log length information
         input_lengths = [len(example["input_ids"]) for example in examples]
-        max_length = min(max(input_lengths), 512)  # Hard cap at 512
+        # Use self.max_seq_length instead of hardcoded 512
+        max_length = min(max(input_lengths), self.max_seq_length)
 
         # Warn if batch has inconsistent lengths
         if max(input_lengths) != min(input_lengths):

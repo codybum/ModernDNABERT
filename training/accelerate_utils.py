@@ -229,7 +229,8 @@ def train_with_accelerate(args):
     data_collator = setup_mlm_data_collator(
         tokenizer=tokenizer,
         mlm_probability=args.mlm_probability,
-        model=model  # Pass model reference to access config.mask_token_id
+        model=model,
+        max_seq_length=args.pre_training_length  # Pass pre_training_length to collator
     )
 
     # Configure data loader
