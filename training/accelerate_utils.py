@@ -516,9 +516,20 @@ def save_model(accelerator, model, tokenizer, output_dir):
     unwrapped_model = accelerator.unwrap_model(model)
 
     if accelerator.is_main_process:
-        # Save model and config using HuggingFace's built-in methods
-        unwrapped_model.save_pretrained(output_dir)
-        logger.info(f"Model saved to {output_dir}")
+        # Temporarily remove tokenizer from config if present
+        tokenizer_from_config = None
+        if hasattr(unwrapped_model.config, 'tokenizer'):
+            tokenizer_from_config = unwrapped_model.config.tokenizer
+            delattr(unwrapped_model.config, 'tokenizer')
+
+        try:
+            # Save model and config using HuggingFace's built-in methods
+            unwrapped_model.save_pretrained(output_dir)
+            logger.info(f"Model saved to {output_dir}")
+        finally:
+            # Restore tokenizer in config
+            if tokenizer_from_config is not None:
+                unwrapped_model.config.tokenizer = tokenizer_from_config
 
         # Save tokenizer if provided
         if tokenizer is not None:
@@ -528,7 +539,6 @@ def save_model(accelerator, model, tokenizer, output_dir):
 
     # Wait for saving to complete
     accelerator.wait_for_everyone()
-
 
 def verify_model_tokenizer_compatibility(model, tokenizer):
     """Verify that model and tokenizer have compatible vocabulary sizes and share tokenizer reference."""
