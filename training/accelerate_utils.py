@@ -336,6 +336,7 @@ def train_with_accelerate(args):
         # Process batches with improved error handling
         for step, batch in enumerate(train_dataloader):
             # Special handling for first few batches in first epoch
+            '''
             if epoch == 0 and step < 5:
                 logger.info(f"Carefully processing batch {step} in first epoch")
                 # Extra safety for first batches - limit sequence length
@@ -345,6 +346,7 @@ def train_with_accelerate(args):
                     if seq_length > 512:  # Be very conservative initially
                         logger.warning(f"  First batch has long sequences ({seq_length}). Truncating to 512.")
                         batch = {k: v[:, :512] if v.dim() > 1 else v for k, v in batch.items()}
+            '''
 
             # Process batch safely
             loss = safe_training_step(model, batch, accelerator, args)
