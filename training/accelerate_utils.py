@@ -764,8 +764,8 @@ def safe_training_step(model, batch, accelerator, args):
                     logger.warning(
                         f"Sequence length {seq_length} with low memory ({available_gb:.2f} GB). Processing in micro-batches.")
                     return _process_in_micro_batches(model, batch, accelerator, args)
-                else:
-                    logger.info(f"Processing long sequence batch (length: {seq_length})")
+                #else:
+                #    logger.info(f"Processing long sequence batch (length: {seq_length})")
 
         # Forward pass
         outputs = model(**batch)
