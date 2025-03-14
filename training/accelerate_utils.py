@@ -81,6 +81,73 @@ def ensure_valid_batch_indices(batch, tokenizer, model):
 
     return batch
 
+
+def modify_bert_attention(model, attention_type):
+    """
+    Modify a BERT model to use the specified attention type.
+
+    Args:
+        model: A BertForMaskedLM model instance
+        attention_type: Type of attention mechanism to use ("standard" or "alibi")
+
+    Returns:
+        The modified model with the specified attention type
+    """
+    from modeling.alibi_attention import modify_bert_for_alibi
+
+    # Get current attention type (if set)
+    current_attention_type = getattr(model.config, 'attention_type', 'standard')
+
+    # If attention type is already set correctly, no need to modify
+    if current_attention_type == attention_type:
+        logger.info(f"Model already uses {attention_type} attention")
+        return model
+
+    if attention_type == "alibi":
+        # Modify model to use ALiBi attention
+        logger.info("Modifying model to use ALiBi attention")
+        return modify_bert_for_alibi(model)
+    elif attention_type == "standard":
+        # If model is currently using ALiBi, revert to standard attention
+        if getattr(model.config, 'use_alibi', False) or current_attention_type == 'alibi':
+            logger.info("Reverting model to use standard attention")
+            # We need to replace ALiBi attention with standard attention
+            from transformers.models.bert.modeling_bert import BertSelfAttention
+
+            # Reset any ALiBi-specific configurations
+            model.config.use_alibi = False
+            model.config.position_embedding_type = "absolute"
+            model.config.attention_type = "standard"
+
+            # Replace ALiBi attention with standard BertSelfAttention in each layer
+            for i, layer in enumerate(model.bert.encoder.layer):
+                old_attention = layer.attention.self
+
+                # Create new standard attention
+                new_attention = BertSelfAttention(model.config)
+
+                # Copy weights from old attention to new attention
+                new_attention.query = old_attention.query
+                new_attention.key = old_attention.key
+                new_attention.value = old_attention.value
+                new_attention.dropout = old_attention.dropout
+
+                # Replace the attention layer
+                layer.attention.self = new_attention
+
+                logger.info(f"Replaced ALiBi attention in layer {i} with standard attention")
+
+            # Resize token embeddings to ensure compatibility
+            model.resize_token_embeddings(len(model.get_input_embeddings().weight))
+
+            logger.info("All layers successfully modified to use standard attention")
+        else:
+            logger.info("Model already uses standard attention")
+
+        return model
+    else:
+        raise ValueError(f"Unsupported attention type: {attention_type}")
+
 def train_with_accelerate(args):
     """
     Main training function using Accelerate with support for selectable attention mechanisms.
@@ -137,7 +204,8 @@ def train_with_accelerate(args):
             num_attention_heads=args.num_attention_heads,
             intermediate_size=args.hidden_size * 4,
             max_position_embeddings=args.pre_training_length,
-            attention_type=args.attention_type,  # Use the specified attention type
+            use_alibi=args.attention_type == "alibi",  # Map attention_type to use_alibi boolean
+            attention_type=args.attention_type,  # Pass the attention_type string as well
             max_supported_length=args.max_supported_model_length,
         )
         model = create_genomic_bert_model(config)
@@ -170,9 +238,8 @@ def train_with_accelerate(args):
         batch_size=args.batch_size,
         collate_fn=data_collator,
         shuffle=True,
-        num_workers=args.num_workers,
+        num_workers=0,  # Set to 0 to avoid multiprocessing pickling issues
         pin_memory=torch.cuda.is_available(),
-        **({"prefetch_factor": 2} if args.num_workers > 0 else {}),
     )
 
     # Prepare optimizer
