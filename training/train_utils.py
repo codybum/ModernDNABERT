@@ -124,10 +124,8 @@ def test_sequence_length_extrapolation(accelerator, model, tokenizer, test_seque
                             # Move to CPU for this sequence only
                             cpu_encoding = {k: v.to('cpu') for k, v in encoding.items()}
 
-                            # Temporarily move model to CPU for this sequence
-                            with accelerator.autocast():
-                                cpu_model = accelerator.unwrap_model(model).to('cpu')
-                                cpu_outputs = cpu_model(**cpu_encoding)
+                            cpu_model = accelerator.unwrap_model(model).to('cpu')
+                            cpu_outputs = cpu_model(**cpu_encoding)
 
                             # Calculate perplexity and record
                             cpu_perplexity = torch.exp(cpu_outputs.loss).item() if hasattr(cpu_outputs,

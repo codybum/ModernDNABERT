@@ -445,8 +445,6 @@ def setup_accelerator(args):
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO if accelerator.is_main_process else logging.WARNING,
-        force=True
     )
 
     return accelerator
@@ -839,9 +837,8 @@ def _process_in_micro_batches(model, batch, accelerator, args, micro_batch_size=
         micro_batch = ensure_valid_batch_indices(micro_batch, tokenizer, model)
 
         # Forward pass
-        with torch.cuda.amp.autocast(enabled=args.fp16):
-            outputs = model(**micro_batch)
-            micro_loss = outputs.loss / args.gradient_accumulation_steps / (full_batch_size / micro_batch_size)
+        outputs = model(**micro_batch)
+        micro_loss = outputs.loss / args.gradient_accumulation_steps / (full_batch_size / micro_batch_size)
 
         # Backward pass - use accelerator
         accelerator.backward(micro_loss)
