@@ -148,7 +148,7 @@ def modify_bert_attention(model, attention_type):
     else:
         raise ValueError(f"Unsupported attention type: {attention_type}")
 
-def train_with_accelerate(args):
+def train_with_accelerate(args, accelerator):
     """
     Main training function using Accelerate with support for selectable attention mechanisms.
 
@@ -156,10 +156,10 @@ def train_with_accelerate(args):
         args: Command-line arguments
     """
     # Use the setup function to initialize accelerator
-    accelerator = setup_accelerator(args)
+    #accelerator = setup_accelerator(args)
 
     # Get the correct device from accelerator
-    device = accelerator.device
+    #device = accelerator.device
     logger = logging.getLogger(__name__)
 
     # Set random seed for reproducibility
@@ -408,18 +408,12 @@ def train_with_accelerate(args):
         logger.info("\nFinal length extrapolation test:")
         test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
 
-    # Run attention comparison if we're on the main process
-    if accelerator.is_main_process and hasattr(args, 'run_attention_comparison') and args.run_attention_comparison:
-        from training.attention_tests import run_attention_comparison
-        logger.info("\nRunning attention mechanism comparison...")
-        run_attention_comparison(args, tokenizer)
-
     logger.info("Training complete!")
 
 
 # Helper functions (these would normally be imported from accelerate_utils.py)
+# In training/accelerate_utils.py, modify setup_accelerator
 def setup_accelerator(args):
-    """Set up an Accelerate environment with proper configuration."""
     # Create checkpoint configuration
     project_config = None
     if args.output_dir:
@@ -428,10 +422,17 @@ def setup_accelerator(args):
             logging_dir=os.path.join(args.output_dir, "logs")
         )
 
-    # Replace with this:
+    # Set up device configuration with explicit device IDs
+    device_placement_config = None
+    if torch.cuda.is_available():
+        # Explicitly map processes to devices
+        device_placement_config = {"device_map": "auto"}
+
+    # Create accelerator with explicit device mapping
     accelerator_config = {
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "project_config": project_config,
+        "device_placement": device_placement_config,
     }
 
     if hasattr(args, 'log_with_tensorboard') and args.log_with_tensorboard:
@@ -440,14 +441,7 @@ def setup_accelerator(args):
     # Create accelerator
     accelerator = Accelerator(**accelerator_config)
 
-    # Configure logging once globally
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-    )
-
     return accelerator
-
 
 def calculate_training_steps(train_dataloader, gradient_accumulation_steps, num_epochs):
     """Calculate the number of update steps for training."""
@@ -608,129 +602,24 @@ def save_model(accelerator, model, tokenizer, output_dir):
     accelerator.wait_for_everyone()
 
 
+# In training/accelerate_utils.py, ensure model and tokenizer are compatible
 def verify_model_tokenizer_compatibility(model, tokenizer):
-    """Verify that model and tokenizer have compatible vocabulary sizes and share tokenizer reference."""
-    tokenizer_vocab_size = tokenizer.vocab_size
-    model_vocab_size = model.config.vocab_size
-    embedding_size = model.get_input_embeddings().weight.shape[0]
-
-    logger.info(f"COMPATIBILITY CHECK:")
-    logger.info(f"  Tokenizer vocab size: {tokenizer_vocab_size}")
-    logger.info(f"  Model config vocab size: {model_vocab_size}")
-    logger.info(f"  Model embedding size: {embedding_size}")
-
-    # CRITICAL FIX: Store tokenizer reference in model config
-    # This allows us to access the tokenizer from the model later
-    model.config.tokenizer = tokenizer
-
-    # Add special tokens to the model config
-    special_tokens = {}
-    for name in ['mask_token', 'pad_token', 'unk_token']:
-        if hasattr(tokenizer, name) and getattr(tokenizer, name) is not None:
-            token = getattr(tokenizer, name)
-            token_id = tokenizer.convert_tokens_to_ids(token)
-            special_tokens[name] = token
-            special_tokens[f"{name}_id"] = token_id
-            logger.info(f"  {name}: '{token}' -> ID: {token_id}")
-
-    # CRITICAL FIX: Verify special token IDs are in valid range
-    for name in ['mask_token_id', 'pad_token_id', 'unk_token_id']:
-        if name in special_tokens and special_tokens[name] >= embedding_size:
-            logger.error(
-                f"Special token {name} has ID {special_tokens[name]} which exceeds embedding size {embedding_size}")
-            safe_id = min(1, embedding_size - 1)  # Use a safe ID
-            special_tokens[name] = safe_id
-            logger.info(f"  Fixed {name} to use ID: {safe_id}")
-
-            # Update tokenizer's special token ID as well if possible
-            token_name = name.replace('_id', '')
-            if hasattr(tokenizer, name):
-                old_id = getattr(tokenizer, name)
-                setattr(tokenizer, name, safe_id)
-                logger.info(f"  Updated {name} in tokenizer from {old_id} to {safe_id}")
-
-    # Add special token information to model config
-    for key, value in special_tokens.items():
-        setattr(model.config, key, value)
-
-    # Check tokenizer and model config
-    if tokenizer_vocab_size != model_vocab_size or tokenizer_vocab_size != embedding_size:
-        logger.warning(
-            f"Vocab size mismatch: Tokenizer={tokenizer_vocab_size}, Model config={model_vocab_size}, Embeddings={embedding_size}")
-
-        # CRITICAL FIX: Choose the safest approach - resize to the minimum of the two sizes
-        new_size = min(tokenizer_vocab_size, max(model_vocab_size, embedding_size))
-        logger.info(f"Resizing model embeddings to safer size: {new_size}")
-
-        try:
-            model.resize_token_embeddings(new_size)
-
-            # Update the model config to reflect the new size
-            model.config.vocab_size = new_size
-
-            # Check if resize worked
-            new_embedding_size = model.get_input_embeddings().weight.shape[0]
-            if new_embedding_size != new_size:
-                logger.error(f"Failed to resize embeddings. Target: {new_size}, Actual: {new_embedding_size}")
-                raise ValueError(f"Failed to resize embeddings correctly")
-            else:
-                logger.info(f"Successfully resized embeddings to {new_embedding_size}")
-        except Exception as e:
-            logger.error(f"Error during embedding resize: {e}")
-            # If resize fails, we'll try a different approach
-            logger.info(f"Attempting alternative approach to fix embedding size")
-
-            # Create new embeddings from scratch with the correct size
-            old_embeddings = model.get_input_embeddings()
-            input_dim = min(old_embeddings.weight.shape[0], new_size)
-
-            new_embeddings = torch.nn.Embedding(new_size, old_embeddings.weight.shape[1])
-            # Copy weights for the overlapping part
-            with torch.no_grad():
-                new_embeddings.weight[:input_dim, :] = old_embeddings.weight[:input_dim, :]
-
-            # Set the new embeddings
-            model.set_input_embeddings(new_embeddings)
-            model.config.vocab_size = new_size
-
-            logger.info(f"Replaced embeddings with new size: {new_size}")
-
-    # CRITICAL FIX: Ensure mask token ID is properly set in model config AND is consistent
+    # First, fix any token ID issues in the tokenizer
     if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
-        mask_token_id = tokenizer.mask_token_id
+        if tokenizer.mask_token_id >= tokenizer.vocab_size:
+            tokenizer.mask_token_id = 1  # Use consistent safe ID
+            logger.warning(f"Fixed tokenizer mask_token_id to use ID 1")
 
-        # Verify mask token ID is within vocab size
-        if mask_token_id >= model.config.vocab_size:
-            logger.warning(f"Mask token ID {mask_token_id} exceeds vocab size {model.config.vocab_size}")
+    # Then, add this to model config
+    model.config.mask_token_id = tokenizer.mask_token_id
 
-            # Use a fixed ID that's safe and consistent everywhere
-            safe_mask_id = min(1, model.config.vocab_size - 1)
+    # Ensure embedding size matches
+    new_size = tokenizer.vocab_size
+    model.resize_token_embeddings(new_size)
 
-            # Update both tokenizer and model consistently
-            model.config.mask_token_id = safe_mask_id
-
-            # Try to update the tokenizer's mask token ID as well if possible
-            if hasattr(tokenizer, 'mask_token_id'):
-                old_id = tokenizer.mask_token_id
-                tokenizer.mask_token_id = safe_mask_id
-                logger.info(f"Updated mask_token_id in tokenizer from {old_id} to {safe_mask_id}")
-
-            logger.info(f"Set mask_token_id consistently to {safe_mask_id} in model config and tokenizer")
-        else:
-            # Ensure the model config has the same value as the tokenizer
-            model.config.mask_token_id = mask_token_id
-            logger.info(f"Set mask_token_id in model config to {mask_token_id} (matching tokenizer)")
-
-    # Perform final validation
-    final_embedding_size = model.get_input_embeddings().weight.shape[0]
-    logger.info(f"Final model embedding size: {final_embedding_size}")
-    logger.info(f"Final model config vocab_size: {model.config.vocab_size}")
-
-    # Force sync model config vocab size with actual embedding size
-    if model.config.vocab_size != final_embedding_size:
-        logger.warning(
-            f"Synchronizing model config vocab_size ({model.config.vocab_size}) with embedding size ({final_embedding_size})")
-        model.config.vocab_size = final_embedding_size
+    # Verify the change was successful
+    if model.get_input_embeddings().weight.shape[0] != new_size:
+        logger.error(f"Failed to resize model embeddings to {new_size}")
 
     return model
 

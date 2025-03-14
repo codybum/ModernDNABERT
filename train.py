@@ -13,8 +13,7 @@ import logging
 import torch
 from accelerate.utils import set_seed
 
-from training.accelerate_utils import train_with_accelerate
-
+from training.accelerate_utils import train_with_accelerate, setup_accelerator
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +22,9 @@ def main():
     """
     Parse arguments and start training with Accelerate.
     """
+
+
+
     # Auto-detect CUDA devices and configure environment
     if torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
@@ -144,6 +146,24 @@ def main():
 
     args = parser.parse_args()
 
+    # Configure Accelerate first
+    accelerator = setup_accelerator(args)
+
+    # Configure logging AFTER accelerator setup to avoid duplication
+    if accelerator.is_main_process:
+        logging.basicConfig(
+            format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+            datefmt="%m/%d/%Y %H:%M:%S",
+            level=logging.INFO if not args.debug else logging.DEBUG
+        )
+    else:
+        # Non-main processes should log only warnings and errors
+        logging.basicConfig(
+            format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+            datefmt="%m/%d/%Y %H:%M:%S",
+            level=logging.WARNING
+        )
+
     # Configure GPU usage based on arguments
     if args.gpu_ids is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_ids
@@ -169,7 +189,7 @@ def main():
 
 
     # Start training with Accelerate
-    train_with_accelerate(args)
+    train_with_accelerate(args, accelerator)
 
 
 if __name__ == "__main__":
