@@ -428,10 +428,9 @@ def setup_accelerator(args):
             logging_dir=os.path.join(args.output_dir, "logs")
         )
 
-    # Configure accelerator with the right settings
+    # Replace with this:
     accelerator_config = {
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
-        "mixed_precision": 'fp16' if args.fp16 else 'no',
         "project_config": project_config,
     }
 

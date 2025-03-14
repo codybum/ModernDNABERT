@@ -58,8 +58,6 @@ def main():
                            help="Force GPU usage even if distributed mode is active")
     gpu_group.add_argument("--gpu_ids", type=str, default=None,
                            help="Comma-separated list of GPU IDs to use (defaults to all available)")
-    gpu_group.add_argument("--fp16", action="store_true",
-                           help="Use mixed precision training")
 
     # Tokenizer options
     tokenizer_group = parser.add_argument_group("Tokenizer Options")
