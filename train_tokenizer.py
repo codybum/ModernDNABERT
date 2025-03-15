@@ -7,9 +7,7 @@ on efficiently training a SentencePiece BPE tokenizer on genomic sequences using
 all available CPU cores.
 """
 
-import os
 import argparse
-import logging
 import time
 import multiprocessing
 import random
@@ -26,10 +24,7 @@ import json
 # UPDATED: Import from sentencepiece_utils instead of genomic_tokenizer
 from tokenization.sentencepiece_utils import (
     SentencePieceGenomicTokenizer,  # Updated class name
-    ensure_special_tokens,  # Updated function name
-    train_sentencepiece_bpe,
-    prepare_genomic_data,
-    create_genomic_tokenizer_from_model
+    ensure_special_tokens
 )
 
 # Configure logging
