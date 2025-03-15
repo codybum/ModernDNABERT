@@ -19,11 +19,9 @@ from tqdm import tqdm
 
 from data.data_collator import GenomicDataset, GenomicMLMDataCollator
 from modeling.alibi_attention import create_genomic_bert_config, create_genomic_bert_model
-from tokenization.genomic_tokenizer import GenomicTokenizer
 from training.train_utils import (
     generate_test_sequences,
     test_sequence_length_extrapolation,
-    test_tokenizer_oov_handling,
     setup_mlm_data_collator
 )
 
@@ -168,7 +166,7 @@ def modify_bert_attention(model, attention_type):
 def train_with_accelerate(args, accelerator):
     """
     Main training function using Accelerate with support for selectable attention mechanisms.
-    This version uses HuggingFace's PreTrainedTokenizerFast instead of SentencePiece.
+    Updated to use standard HuggingFace tokenizers without custom classes.
 
     Args:
         args: Command-line arguments
@@ -188,17 +186,13 @@ def train_with_accelerate(args, accelerator):
     # Wait for all processes to sync
     accelerator.wait_for_everyone()
 
-    # Load pre-trained tokenizer - UPDATED to use HuggingFace tokenizer directly
+    # Load pre-trained tokenizer - SIMPLIFIED to use standard tokenizers
     logger.info(f"Loading pre-trained tokenizer from {args.tokenizer_path}")
     try:
-        from transformers import PreTrainedTokenizerFast
-        from tokenization.genomic_tokenizer import GenomicTokenizer, _ensure_special_tokens
+        # Use genomic utilities to load any tokenizer type
+        from tokenization.genomic_utils import load_genomic_tokenizer, test_tokenizer_oov_handling
 
-        # Try loading as GenomicTokenizer first for domain-specific methods
-        tokenizer = GenomicTokenizer.from_pretrained(args.tokenizer_path)
-
-        # Ensure special tokens are properly defined
-        _ensure_special_tokens(tokenizer)
+        tokenizer = load_genomic_tokenizer(args.tokenizer_path)
 
         # Test tokenizer OOV handling
         if accelerator.is_main_process:
@@ -209,14 +203,7 @@ def train_with_accelerate(args, accelerator):
                 logger.error("This indicates potential problems with token ID handling")
 
     except Exception as e:
-        logger.warning(f"Failed to load tokenizer as GenomicTokenizer: {e}")
-        logger.info("Trying to load as standard PreTrainedTokenizerFast...")
-
-        try:
-            tokenizer = PreTrainedTokenizerFast.from_pretrained(args.tokenizer_path)
-            logger.info("Successfully loaded tokenizer as PreTrainedTokenizerFast")
-        except Exception as e2:
-            raise ValueError(f"Failed to load tokenizer from {args.tokenizer_path}: {e2}")
+        raise ValueError(f"Failed to load tokenizer from {args.tokenizer_path}: {e}")
 
     # Setup model with the specified attention type
     if args.model_path and os.path.exists(args.model_path):
@@ -237,8 +224,8 @@ def train_with_accelerate(args, accelerator):
             num_attention_heads=args.num_attention_heads,
             intermediate_size=args.hidden_size * 4,
             max_position_embeddings=args.pre_training_length,
-            use_alibi=args.attention_type == "alibi",  # Map attention_type to use_alibi boolean
-            attention_type=args.attention_type,  # Pass the attention_type string as well
+            use_alibi=args.attention_type == "alibi",
+            attention_type=args.attention_type,
             max_supported_length=args.max_supported_model_length,
         )
         model = create_genomic_bert_model(config)
@@ -249,7 +236,7 @@ def train_with_accelerate(args, accelerator):
     # CRITICAL FIX: Verify and synchronize model-tokenizer compatibility
     model = verify_model_tokenizer_compatibility(model, tokenizer)
 
-    # Prepare dataset
+    # Prepare dataset - use genomic_utils for tokenization if needed
     train_dataset = GenomicDataset(
         args.input_files,
         tokenizer,
