@@ -22,7 +22,6 @@ from modeling.alibi_attention import create_genomic_bert_config, create_genomic_
 from training.train_utils import (
     generate_test_sequences,
     test_sequence_length_extrapolation,
-    test_tokenizer_oov_handling,
     setup_mlm_data_collator
 )
 
@@ -439,16 +438,26 @@ def train_with_accelerate(args, accelerator):
             model, optimizer, lr_scheduler, tokenizer
         )
 
-    # MODIFIED SECTION: Save final model without wait_for_everyone()
     try:
         if accelerator.is_main_process:
             final_dir = os.path.join(args.output_dir, "final")
             logger.info(f"Saving final model to {final_dir}")
             save_model(accelerator, model, tokenizer, final_dir)
 
-            # Final length extrapolation test (only on main process)
+            # Create a standalone copy of the model for testing
+            logger.info("\nPreparing model for final length extrapolation test...")
+            test_model = accelerator.unwrap_model(model)
+            # Create a fresh copy to fully detach from distributed state
+            test_model = copy.deepcopy(test_model)
+            # Move to CPU to avoid any distributed GPU operations
+            test_model = test_model.to('cpu')
+            test_model.eval()
+
+            # Final length extrapolation test
             logger.info("\nFinal length extrapolation test:")
-            test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
+            # Use a CPU-specific accelerator reference to avoid DDP operations
+            cpu_accelerator = type('CPUAccelerator', (), {'device': torch.device('cpu'), 'unwrap_model': lambda x: x})()
+            test_sequence_length_extrapolation(cpu_accelerator, test_model, tokenizer, extrapolation_test_seqs)
     except Exception as e:
         logger.error(f"Error during final model saving or testing: {e}")
         if accelerator.is_main_process:
