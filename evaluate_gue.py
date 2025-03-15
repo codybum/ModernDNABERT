@@ -180,8 +180,8 @@ class ModernDNABERTForSequenceClassification(torch.nn.Module):
 
 def load_model_for_classification(model_path, tokenizer, num_labels):
     """
-    Load a model with correct position embeddings size for classification tasks.
-    Handles the case where the model is already a BertForMaskedLM.
+    Load a model with correct handling for ALiBi models and distributed training.
+    This function is designed to be compatible with both single-GPU and multi-GPU setups.
     """
     try:
         # Import SafeTensors if available
@@ -191,33 +191,38 @@ def load_model_for_classification(model_path, tokenizer, num_labels):
         logger.warning("SafeTensors not installed. Using PyTorch loading instead.")
         has_safetensors = False
 
-    # Step 1: Try to load the original config
+    # Step 1: Load the original config
     config_path = os.path.join(model_path, "config.json")
     if os.path.exists(config_path):
         logger.info(f"Loading configuration from {config_path}")
         config = PretrainedConfig.from_json_file(config_path)
+
+        # Store the original position embeddings size
+        original_max_position = getattr(config, 'max_position_embeddings', 512)
+        logger.info(f"Original max_position_embeddings: {original_max_position}")
+
+        # Set max_position_embeddings to 512 for classification tasks
+        # But don't change it yet - we'll handle this in the state dict
+        config.max_position_embeddings = original_max_position
     else:
-        # If no config, create one with correct position embeddings size
-        logger.info(f"No config.json found, creating config with position embeddings size 512")
+        # If no config, create one with default position embeddings size
+        logger.info(f"No config.json found, creating default config")
         config = create_genomic_bert_config(
             vocab_size=tokenizer.vocab_size,
-            max_position_embeddings=512,  # CRITICAL: Use 512 to match the checkpoint
+            max_position_embeddings=512,
             use_alibi=True,
             attention_type="alibi"
         )
+        original_max_position = 512
 
-    # Step 2: Remember original position embedding size before changing it
-    original_max_position_embeddings = getattr(config, 'max_position_embeddings', 512)
-    logger.info(f"Original max_position_embeddings: {original_max_position_embeddings}")
+    # Step 2: Check if the model uses ALiBi attention
+    uses_alibi = getattr(config, 'use_alibi', False) or getattr(config, 'attention_type', '') == 'alibi'
+    if uses_alibi:
+        logger.info("Model uses ALiBi attention")
+        # For ALiBi models, we'll keep the position embeddings but they won't be used
 
-    # Step 3: Create base BERT model with ORIGINAL position embedding size
-    logger.info("Creating base BERT model")
-    bert_model = create_genomic_bert_model(config)
-
-    # Step 4: Load the model weights
+    # Step 3: Load state dict first to inspect/modify it before creating model
     state_dict = None
-
-    # Check for SafeTensors file
     safetensors_path = os.path.join(model_path, "model.safetensors")
     pytorch_path = os.path.join(model_path, "pytorch_model.bin")
 
@@ -236,8 +241,30 @@ def load_model_for_classification(model_path, tokenizer, num_labels):
     else:
         raise FileNotFoundError(f"No model weights found at {model_path}")
 
-    # Step 5: Load weights into model
+    # Step 4: Modify config for creating the model
+    # For classification, we use a smaller position embedding size
+    if original_max_position != 512:
+        logger.info(f"Setting max_position_embeddings to 512 for classification model")
+        config.max_position_embeddings = 512
+
+    # Step 5: Create model with modified config
+    logger.info("Creating base BERT model")
+    bert_model = create_genomic_bert_model(config)
+
+    # Step 6: Handle the position embeddings in state_dict for ALiBi models
+    if 'bert.embeddings.position_embeddings.weight' in state_dict:
+        pos_embed_weight = state_dict['bert.embeddings.position_embeddings.weight']
+        pretrained_size = pos_embed_weight.shape[0]
+
+        if pretrained_size != 512 and uses_alibi:
+            logger.info(f"ALiBi model: Handling position embeddings tensor of size {pretrained_size}")
+            # Option 1: Remove position embeddings from state dict for ALiBi models
+            del state_dict['bert.embeddings.position_embeddings.weight']
+            logger.info("Removed position embeddings from state dict for ALiBi model")
+
+    # Step 7: Load weights into model
     logger.info("Loading weights into model")
+    # Use strict=False to allow missing position embeddings in ALiBi models
     missing_keys, unexpected_keys = bert_model.load_state_dict(state_dict, strict=False)
 
     # Log missing and unexpected keys
@@ -246,14 +273,16 @@ def load_model_for_classification(model_path, tokenizer, num_labels):
     if unexpected_keys:
         logger.info(f"Unexpected keys: {unexpected_keys}")
 
-    # Step 6: NOW resize position embeddings if needed for the task
-    if hasattr(bert_model, "resize_position_embeddings") and original_max_position_embeddings != 512:
-        logger.info(f"Resizing position embeddings from {original_max_position_embeddings} to 512")
-        bert_model.resize_position_embeddings(512)
-
-    # Step 7: Create sequence classification model
+    # Step 8: Create sequence classification model
     logger.info(f"Creating sequence classification model with {num_labels} labels")
     model = ModernDNABERTForSequenceClassification(bert_model, num_labels)
+
+    # Step 9: Add DDP-specific settings to model
+    if uses_alibi:
+        if hasattr(model.bert.embeddings, 'position_embeddings'):
+            # Freeze position embeddings to prevent DDP sync issues
+            model.bert.embeddings.position_embeddings.requires_grad = False
+            logger.info("Froze position embeddings for distributed training compatibility")
 
     return model
 
