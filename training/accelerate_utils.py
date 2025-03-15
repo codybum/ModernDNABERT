@@ -468,15 +468,20 @@ def train_with_accelerate(args, accelerator):
             model, optimizer, lr_scheduler, tokenizer
         )
 
-    # Save final model
-    if accelerator.is_main_process:
-        final_dir = os.path.join(args.output_dir, "final")
-        save_model(accelerator, model, tokenizer, final_dir)
+    # MODIFIED SECTION: Save final model without wait_for_everyone()
+    try:
+        if accelerator.is_main_process:
+            final_dir = os.path.join(args.output_dir, "final")
+            logger.info(f"Saving final model to {final_dir}")
+            save_model(accelerator, model, tokenizer, final_dir)
 
-    # Final length extrapolation test (only on main process)
-    if accelerator.is_main_process:
-        logger.info("\nFinal length extrapolation test:")
-        test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
+            # Final length extrapolation test (only on main process)
+            logger.info("\nFinal length extrapolation test:")
+            test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
+    except Exception as e:
+        logger.error(f"Error during final model saving or testing: {e}")
+        if accelerator.is_main_process:
+            logger.info("Training completed but final model saving failed. Use the last checkpoint instead.")
 
     logger.info("Training complete!")
 
@@ -704,18 +709,14 @@ def resume_from_checkpoint(accelerator, args, num_update_steps_per_epoch):
 
 
 def save_model(accelerator, model, tokenizer, output_dir):
-    """Save the model and tokenizer using Accelerate."""
+    """Save the model and tokenizer using Accelerate with improved robustness for distributed training."""
     # Create output directory if needed
     if accelerator.is_main_process:
         os.makedirs(output_dir, exist_ok=True)
 
-    # Wait for directory creation
-    accelerator.wait_for_everyone()
+        # Unwrap model and save on main process
+        unwrapped_model = accelerator.unwrap_model(model)
 
-    # Unwrap model and save on main process
-    unwrapped_model = accelerator.unwrap_model(model)
-
-    if accelerator.is_main_process:
         # Temporarily remove tokenizer from config if present
         tokenizer_from_config = None
         if hasattr(unwrapped_model.config, 'tokenizer'):
@@ -726,6 +727,8 @@ def save_model(accelerator, model, tokenizer, output_dir):
             # Save model and config using HuggingFace's built-in methods
             unwrapped_model.save_pretrained(output_dir)
             logger.info(f"Model saved to {output_dir}")
+        except Exception as e:
+            logger.error(f"Error saving model: {e}")
         finally:
             # Restore tokenizer in config
             if tokenizer_from_config is not None:
@@ -733,13 +736,15 @@ def save_model(accelerator, model, tokenizer, output_dir):
 
         # Save tokenizer if provided
         if tokenizer is not None:
-            tokenizer_path = os.path.join(output_dir, "tokenizer")
-            tokenizer.save_pretrained(tokenizer_path)
-            logger.info(f"Tokenizer saved to {tokenizer_path}")
+            try:
+                tokenizer_path = os.path.join(output_dir, "tokenizer")
+                tokenizer.save_pretrained(tokenizer_path)
+                logger.info(f"Tokenizer saved to {tokenizer_path}")
+            except Exception as e:
+                logger.error(f"Error saving tokenizer: {e}")
 
-    # Wait for saving to complete
-    accelerator.wait_for_everyone()
-
+    # No need to wait for other processes - this was causing the timeout
+    # Removed: accelerator.wait_for_everyone()
 
 def verify_model_tokenizer_compatibility(model, tokenizer):
     # First, fix any token ID issues in the tokenizer
