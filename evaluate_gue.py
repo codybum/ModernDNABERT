@@ -132,14 +132,30 @@ class ModernDNABERTForSequenceClassification(torch.nn.Module):
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             return_dict=True,
+            output_hidden_states=True,  # Request hidden states explicitly
         )
 
-        # For BertForMaskedLM, we need the hidden states
+        # For BertForMaskedLM, we need to access the hidden states differently
         if hasattr(bert_outputs, 'hidden_states') and bert_outputs.hidden_states is not None:
+            # If hidden_states is available, use the last layer
             sequence_output = bert_outputs.hidden_states[-1]
-        else:
-            # If last_hidden_state is available
+        elif hasattr(bert_outputs, 'last_hidden_state'):
+            # If last_hidden_state is available (typical for BertModel)
             sequence_output = bert_outputs.last_hidden_state
+        else:
+            # If we can't get the hidden states, try to access the internal BERT model
+            try:
+                # BertForMaskedLM typically has a .bert attribute that's a BertModel
+                internal_bert_outputs = self.bert.bert(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    token_type_ids=token_type_ids,
+                    return_dict=True,
+                )
+                sequence_output = internal_bert_outputs.last_hidden_state
+            except AttributeError:
+                raise ValueError(
+                    "Cannot extract sequence output from model. Make sure it provides either hidden_states or last_hidden_state.")
 
         # Use the [CLS] token for classification
         pooled_output = sequence_output[:, 0]
@@ -160,7 +176,6 @@ class ModernDNABERTForSequenceClassification(torch.nn.Module):
             hidden_states=bert_outputs.hidden_states if hasattr(bert_outputs, 'hidden_states') else None,
             attentions=bert_outputs.attentions if hasattr(bert_outputs, 'attentions') else None,
         )
-
 
 def load_model_for_classification(model_path, tokenizer, num_labels):
     """
