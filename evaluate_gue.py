@@ -177,6 +177,7 @@ class ModernDNABERTForSequenceClassification(torch.nn.Module):
             attentions=bert_outputs.attentions if hasattr(bert_outputs, 'attentions') else None,
         )
 
+
 def load_model_for_classification(model_path, tokenizer, num_labels):
     """
     Load a model with correct position embeddings size for classification tasks.
@@ -205,16 +206,11 @@ def load_model_for_classification(model_path, tokenizer, num_labels):
             attention_type="alibi"
         )
 
-    # Step 2: Ensure max_position_embeddings is set to 512
-    if hasattr(config, 'max_position_embeddings'):
-        if config.max_position_embeddings != 512:
-            logger.info(f"Changing max_position_embeddings from {config.max_position_embeddings} to 512")
-            config.max_position_embeddings = 512
-    else:
-        logger.info("Adding max_position_embeddings=512 to config")
-        config.max_position_embeddings = 512
+    # Step 2: Remember original position embedding size before changing it
+    original_max_position_embeddings = getattr(config, 'max_position_embeddings', 512)
+    logger.info(f"Original max_position_embeddings: {original_max_position_embeddings}")
 
-    # Step 3: Create base BERT model
+    # Step 3: Create base BERT model with ORIGINAL position embedding size
     logger.info("Creating base BERT model")
     bert_model = create_genomic_bert_model(config)
 
@@ -250,12 +246,16 @@ def load_model_for_classification(model_path, tokenizer, num_labels):
     if unexpected_keys:
         logger.info(f"Unexpected keys: {unexpected_keys}")
 
-    # Step 6: Create sequence classification model
+    # Step 6: NOW resize position embeddings if needed for the task
+    if hasattr(bert_model, "resize_position_embeddings") and original_max_position_embeddings != 512:
+        logger.info(f"Resizing position embeddings from {original_max_position_embeddings} to 512")
+        bert_model.resize_position_embeddings(512)
+
+    # Step 7: Create sequence classification model
     logger.info(f"Creating sequence classification model with {num_labels} labels")
     model = ModernDNABERTForSequenceClassification(bert_model, num_labels)
 
     return model
-
 
 def evaluate_on_task(model_path, tokenizer_path, task_path, output_dir, task_name, max_length=512,
                      batch_size=16, learning_rate=3e-5, epochs=3, seed=42, use_alibi=True):
