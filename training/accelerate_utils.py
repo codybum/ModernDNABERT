@@ -361,6 +361,7 @@ def train_with_accelerate(args, accelerator):
             accelerator.state._ddp_kwargs = {}
         # Add find_unused_parameters to the DDP kwargs
         accelerator.state._ddp_kwargs['find_unused_parameters'] = True
+        accelerator.state._ddp_kwargs['static_graph'] = False
         logger.info("Enabled find_unused_parameters for DDP")
 
     # Prepare with accelerator
