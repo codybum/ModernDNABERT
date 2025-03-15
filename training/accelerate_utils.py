@@ -416,14 +416,6 @@ def train_with_accelerate(args, accelerator):
             train_dataloader.sampler.set_epoch(epoch)
             logger.info(f"Set epoch {epoch} for distributed sampler")
 
-        # Report GPU memory status on main process
-        if torch.cuda.is_available() and accelerator.is_main_process:
-            logger.info(f"Starting epoch {epoch} - GPU memory status:")
-            for i in range(torch.cuda.device_count()):
-                allocated = torch.cuda.memory_allocated(i) / (1024 * 1024)
-                reserved = torch.cuda.memory_reserved(i) / (1024 * 1024)
-                logger.info(f"  GPU {i}: Allocated: {allocated:.2f} MB, Reserved: {reserved:.2f} MB")
-
         # Process batches with improved error handling
         for step, batch in enumerate(train_dataloader):
             # Process batch safely
