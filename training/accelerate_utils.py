@@ -485,18 +485,8 @@ def train_with_accelerate(args, accelerator):
 
     logger.info("Training complete!")
 
-# The rest of the helper functions remain unchanged from the original file
+
 def setup_accelerator(args):
-    """
-    Set up a properly configured Accelerator instance for multi-GPU training.
-    This version includes fixes for RNG synchronization issues with Python 3.12.
-
-    Args:
-        args: Command-line arguments with training configuration
-
-    Returns:
-        Accelerator: Properly configured accelerator instance
-    """
     # Create checkpoint configuration
     project_config = None
     if args.output_dir:
@@ -508,11 +498,9 @@ def setup_accelerator(args):
     # Set up device configuration with explicit device IDs
     device_placement_config = None
     if torch.cuda.is_available():
-        # Explicitly map processes to devices
         device_placement_config = {"device_map": "auto"}
 
     # Create accelerator with explicit device mapping
-    # IMPORTANT: We don't pass rng_types here to avoid RNG synchronization issues
     accelerator_config = {
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "project_config": project_config,
@@ -526,7 +514,6 @@ def setup_accelerator(args):
     accelerator = Accelerator(**accelerator_config)
 
     # Explicitly disable RNG state synchronization in the state object
-    # This is the key fix for the "Invalid mt19937 state" error
     if hasattr(accelerator, 'state'):
         if hasattr(accelerator.state, 'sync_rng_states'):
             accelerator.state.sync_rng_states = False
