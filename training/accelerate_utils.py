@@ -6,12 +6,10 @@ pre-trained tokenizers instead of training them.
 import os
 import math
 import logging
-import gc
+import copy
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union, Any
 
 import torch
-from torch.utils.data import DataLoader
 from transformers import get_scheduler, BertForMaskedLM
 from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration
