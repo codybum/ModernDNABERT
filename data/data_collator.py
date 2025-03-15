@@ -9,12 +9,29 @@ import random
 import logging
 import torch
 from torch.utils.data import Dataset
-from typing import List, Optional, Dict, Any, Union, Tuple
+from typing import List, Optional
 
 from transformers import DataCollatorForLanguageModeling
 
 logger = logging.getLogger(__name__)
 
+
+def reverse_complement(sequence):
+    """Generate the reverse complement of a DNA sequence."""
+    complement_map = {
+        'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G',
+        'a': 't', 't': 'a', 'g': 'c', 'c': 'g',
+        'N': 'N', 'n': 'n',
+        # Extended ambiguous nucleotides
+        'R': 'Y', 'Y': 'R', 'M': 'K', 'K': 'M',
+        'S': 'S', 'W': 'W', 'H': 'D', 'B': 'V',
+        'V': 'B', 'D': 'H',
+        'r': 'y', 'y': 'r', 'm': 'k', 'k': 'm',
+        's': 's', 'w': 'w', 'h': 'd', 'b': 'v',
+        'v': 'b', 'd': 'h'
+    }
+
+    return ''.join(complement_map.get(base, base) for base in reversed(sequence))
 
 class GenomicDataset(Dataset):
     """
@@ -35,6 +52,7 @@ class GenomicDataset(Dataset):
             stride: int = 1000,
             sample_long_sequences: bool = True,
             max_safe_sequence_length: int = 50000,
+            use_reverse_complement: bool = True,  # New parameter
     ):
         """
         Initialize the dataset.
@@ -49,6 +67,7 @@ class GenomicDataset(Dataset):
             stride: Stride for overlapping chunks
             sample_long_sequences: Whether to include longer sequences for extrapolation
             max_safe_sequence_length: Maximum safe sequence length for processing
+            use_reverse_complement: Whether to include reverse complements for augmentation
         """
         self.tokenizer = tokenizer
         self.pre_training_length = pre_training_length
@@ -58,6 +77,7 @@ class GenomicDataset(Dataset):
         self.stride = stride
         self.sample_long_sequences = sample_long_sequences
         self.max_safe_sequence_length = max_safe_sequence_length
+        self.use_reverse_complement = use_reverse_complement  # Store the new parameter
 
         # Load and prepare sequences
         self.sequences = self._load_sequences(file_paths)
@@ -108,7 +128,7 @@ class GenomicDataset(Dataset):
 
     def _prepare_chunks(self) -> List[str]:
         """
-        Split sequences into chunks with variable lengths.
+        Split sequences into chunks with variable lengths, including reverse complements.
 
         Returns:
             List of chunks
@@ -118,6 +138,7 @@ class GenomicDataset(Dataset):
         # Track statistics for logging
         total_sequences = len(self.sequences)
         truncated_count = 0
+        rc_count = 0  # Counter for reverse complements
 
         for sequence in self.sequences:
             # Truncate very long sequences for safety
@@ -131,6 +152,12 @@ class GenomicDataset(Dataset):
                 if len(chunk) >= 100:  # Only keep reasonably sized chunks
                     chunks.append(chunk)
 
+                    # Add reverse complement if enabled
+                    if self.use_reverse_complement:
+                        rc_chunk = reverse_complement(chunk)
+                        chunks.append(rc_chunk)
+                        rc_count += 1
+
             # Optionally add longer chunks for extrapolation training
             if self.sample_long_sequences and len(sequence) > self.chunk_size * 2:
                 # Add a few longer chunks - up to 2-4x the normal chunk size
@@ -142,9 +169,18 @@ class GenomicDataset(Dataset):
                         long_chunk = sequence[start:start + long_size]
                         chunks.append(long_chunk)
 
+                        # Add reverse complement for long chunks too
+                        if self.use_reverse_complement:
+                            rc_long_chunk = reverse_complement(long_chunk)
+                            chunks.append(rc_long_chunk)
+                            rc_count += 1
+
         if truncated_count > 0:
             logger.warning(
                 f"Truncated {truncated_count} out of {total_sequences} sequences that exceeded maximum safe length of {self.max_safe_sequence_length}")
+
+        if self.use_reverse_complement and rc_count > 0:
+            logger.info(f"Added {rc_count} reverse complement sequences for augmentation")
 
         return chunks
 
@@ -248,6 +284,7 @@ class GenomicDataset(Dataset):
             "attention_mask": torch.ones(length, dtype=torch.long),
             "token_type_ids": torch.zeros(length, dtype=torch.long)
         }
+
 
 
 class GenomicMLMDataCollator(DataCollatorForLanguageModeling):

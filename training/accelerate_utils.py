@@ -236,7 +236,13 @@ def train_with_accelerate(args, accelerator):
     # CRITICAL FIX: Verify and synchronize model-tokenizer compatibility
     model = verify_model_tokenizer_compatibility(model, tokenizer)
 
-    # Prepare dataset - use genomic_utils for tokenization if needed
+    use_reverse_complement = True
+    if args.disable_reverse_complement:
+        use_reverse_complement = False
+    elif hasattr(args, 'use_reverse_complement'):
+        use_reverse_complement = args.use_reverse_complement
+
+    # Prepare dataset
     train_dataset = GenomicDataset(
         args.input_files,
         tokenizer,
@@ -247,6 +253,7 @@ def train_with_accelerate(args, accelerator):
         stride=args.stride,
         sample_long_sequences=args.sample_long_sequences,
         max_safe_sequence_length=args.max_safe_sequence_length,
+        use_reverse_complement=use_reverse_complement,
     )
 
     data_collator = setup_mlm_data_collator(

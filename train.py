@@ -90,6 +90,10 @@ def main():
                            help="Maximum safe sequence length for processing (default: 50000)")
     seq_group.add_argument("--max_supported_model_length", type=int, default=16384,
                            help="Maximum sequence length the model should support (default: 16384)")
+    seq_group.add_argument("--use_reverse_complement", action="store_true",
+                           help="Include reverse complement sequences for augmentation (default: True)")
+    seq_group.add_argument("--disable_reverse_complement", action="store_true",
+                           help="Disable reverse complement augmentation")
 
     # Training options
     training_group = parser.add_argument_group("Training Options")
