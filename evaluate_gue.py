@@ -282,7 +282,7 @@ def load_model_for_classification(model_path, tokenizer, num_labels):
     # For classification, we use a smaller position embedding size
     if original_max_position != 512:
         logger.info(f"Setting max_position_embeddings to " + str(original_max_position) + " for classification model")
-        config.max_position_embeddings = 6144
+        config.max_position_embeddings = original_max_position
 
     # Step 5: Create model with modified config
     logger.info("Creating base BERT model")
