@@ -168,7 +168,7 @@ def modify_bert_attention(model, attention_type):
 def train_with_accelerate(args, accelerator):
     """
     Main training function using Accelerate with support for selectable attention mechanisms.
-    This version fixes the RNG synchronization issues with Python 3.12 and DDP issues with ALiBi.
+    This version uses HuggingFace's PreTrainedTokenizerFast instead of SentencePiece.
 
     Args:
         args: Command-line arguments
@@ -188,40 +188,16 @@ def train_with_accelerate(args, accelerator):
     # Wait for all processes to sync
     accelerator.wait_for_everyone()
 
-    # Load pre-trained tokenizer
+    # Load pre-trained tokenizer - UPDATED to use HuggingFace tokenizer directly
     logger.info(f"Loading pre-trained tokenizer from {args.tokenizer_path}")
     try:
+        from transformers import PreTrainedTokenizerFast
+        from tokenization.genomic_tokenizer import GenomicTokenizer, _ensure_special_tokens
+
+        # Try loading as GenomicTokenizer first for domain-specific methods
         tokenizer = GenomicTokenizer.from_pretrained(args.tokenizer_path)
 
         # Ensure special tokens are properly defined
-        def _ensure_special_tokens(tokenizer):
-            # Get vocabulary size for validation
-            vocab_size = tokenizer.vocab_size
-
-            # Fix mask_token_id directly if it exceeds vocab size
-            if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
-                if tokenizer.mask_token_id >= vocab_size:
-                    # Use a fixed safe ID
-                    safe_id = 1  # Use a simple, safe ID within vocab range
-
-                    # Store the original token text
-                    mask_token_text = tokenizer.mask_token
-
-                    # Update the tokenizer's internal mappings
-                    tokenizer.mask_token_id = safe_id
-
-                    # Update the special tokens dictionary if it exists
-                    if hasattr(tokenizer, 'special_tokens_map'):
-                        tokenizer.special_tokens_map['mask_token'] = mask_token_text
-
-                    # Make sure the vocab knows about this mapping
-                    if hasattr(tokenizer, 'added_tokens_encoder'):
-                        tokenizer.added_tokens_encoder[mask_token_text] = safe_id
-                    if hasattr(tokenizer, 'added_tokens_decoder'):
-                        tokenizer.added_tokens_decoder[safe_id] = mask_token_text
-
-                    logger.info(f"Fixed mask_token to use ID {safe_id} instead of {tokenizer.mask_token_id}")
-
         _ensure_special_tokens(tokenizer)
 
         # Test tokenizer OOV handling
@@ -233,7 +209,14 @@ def train_with_accelerate(args, accelerator):
                 logger.error("This indicates potential problems with token ID handling")
 
     except Exception as e:
-        raise ValueError(f"Failed to load tokenizer from {args.tokenizer_path}: {e}")
+        logger.warning(f"Failed to load tokenizer as GenomicTokenizer: {e}")
+        logger.info("Trying to load as standard PreTrainedTokenizerFast...")
+
+        try:
+            tokenizer = PreTrainedTokenizerFast.from_pretrained(args.tokenizer_path)
+            logger.info("Successfully loaded tokenizer as PreTrainedTokenizerFast")
+        except Exception as e2:
+            raise ValueError(f"Failed to load tokenizer from {args.tokenizer_path}: {e2}")
 
     # Setup model with the specified attention type
     if args.model_path and os.path.exists(args.model_path):

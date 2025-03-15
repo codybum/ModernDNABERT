@@ -23,8 +23,14 @@ import glob
 import logging
 import json
 
-# Import only what we need directly
-from tokenization.genomic_tokenizer import GenomicTokenizer, _ensure_special_tokens
+# UPDATED: Import from sentencepiece_utils instead of genomic_tokenizer
+from tokenization.sentencepiece_utils import (
+    SentencePieceGenomicTokenizer,  # Updated class name
+    ensure_special_tokens,  # Updated function name
+    train_sentencepiece_bpe,
+    prepare_genomic_data,
+    create_genomic_tokenizer_from_model
+)
 
 # Configure logging
 logging.basicConfig(
@@ -216,7 +222,7 @@ def convert_sentencepiece_to_hf(
                 logger.warning(f"Error mapping special token {token_name}: {e}")
                 # Use safe defaults
                 special_token_ids[token_name] = {"unk_token": 0, "pad_token": 0, "mask_token": 1, "cls_token": 2,
-                                                "sep_token": 3}.get(token_name, 4)
+                                                 "sep_token": 3}.get(token_name, 4)
 
         logger.info(f"Special token IDs: {special_token_ids}")
 
@@ -296,6 +302,7 @@ def convert_sentencepiece_to_hf(
         logger.error(f"Conversion failed: {e}")
         logger.exception("Detailed exception:")
         raise
+
 
 def process_fasta_chunk(chunk_data):
     """Process a chunk of a FASTA file to extract valid genomic sequences."""
@@ -644,9 +651,9 @@ def main():
     other_group.add_argument("--force", action="store_true",
                              help="Overwrite existing tokenizer files")
     other_group.add_argument("--skip_hf_conversion", action="store_true",
-                        help="Skip conversion to HuggingFace format (conversion is ON by default)")
+                             help="Skip conversion to HuggingFace format (conversion is ON by default)")
     other_group.add_argument("--hf_tokenizer_dir", type=str, default=None,
-                        help="Output directory for HuggingFace tokenizer (default: output_dir/hf_tokenizer)")
+                             help="Output directory for HuggingFace tokenizer (default: output_dir/hf_tokenizer)")
 
     args = parser.parse_args()
 
@@ -711,16 +718,18 @@ def main():
         logger.info(f"SentencePiece training completed in {training_time - data_prep_time:.2f} seconds")
 
         # Step 3: Create and configure GenomicTokenizer
-        logger.info("Creating GenomicTokenizer with special tokens...")
-        tokenizer = GenomicTokenizer(
+        logger.info("Creating SentencePieceGenomicTokenizer with special tokens...")
+
+        # UPDATED: Use SentencePieceGenomicTokenizer instead of GenomicTokenizer
+        tokenizer = SentencePieceGenomicTokenizer(
             sentencepiece_model_file=model_file,
             unk_token="<unk>",
             pad_token="<pad>",
             mask_token="<mask>"
         )
 
-        # Ensure special tokens are properly configured
-        _ensure_special_tokens(tokenizer)
+        # UPDATED: Use ensure_special_tokens instead of _ensure_special_tokens
+        ensure_special_tokens(tokenizer)
 
         # Step 4: Save tokenizer
         tokenizer_output_dir = os.path.join(args.output_dir, "tokenizer")
@@ -764,7 +773,24 @@ def main():
                         sep_token="<sep>"
                     )
                     logger.info("Verifying HuggingFace tokenizer...")
-                    # [Verification code continues as before]
+
+                    test_sequences = [
+                        "ATGCATGCATGC",
+                        "GGGAAATTTCCC",
+                        "ATATATATATAT",
+                        "GCGCGCGCGCGC"
+                    ]
+
+                    for seq in test_sequences:
+                        tokens = hf_tokenizer.tokenize(seq)
+                        token_ids = hf_tokenizer.convert_tokens_to_ids(tokens)
+                        decoded = hf_tokenizer.decode(token_ids)
+
+                        logger.info(f"Test sequence: {seq}")
+                        logger.info(f"Tokens: {tokens}")
+                        logger.info(f"Token IDs: {token_ids}")
+                        logger.info(f"Decoded: {decoded}")
+                        logger.info("-" * 40)
 
             except Exception as e:
                 logger.error(f"Failed to convert to HuggingFace format: {e}")
