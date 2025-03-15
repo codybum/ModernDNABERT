@@ -204,8 +204,8 @@ class GenomicTrainer(Trainer):
 
         # Use PyTorch's native save instead of SafeTensors
         # This avoids issues with shared memory tensors
-        logger = self.get_logger()
-        logger.info(f"Saving model to {output_dir}")
+        # logger = self.get_logger()
+        # logger.info(f"Saving model to {output_dir}")
         torch.save(cleaned_state_dict, os.path.join(output_dir, "pytorch_model.bin"))
 
         # Save the config
