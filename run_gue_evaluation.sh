@@ -89,28 +89,28 @@ BASE_BATCH_SIZE=128  # Per GPU for medium-length sequences - using much larger b
 # EMP tasks - originally 128, now using 12288 (double pre-training length) to test extrapolation
 # With 8x144GB GPUs, we can push sequence lengths far beyond pre-training
 for task in H3 H3K14ac H3K36me3 H3K4me1 H3K4me2 H3K4me3 H3K79me3 H3K9ac H4 H4ac; do
-    run_task "emp_$task" 12288 $((BASE_BATCH_SIZE/2)) 2e-5 3  # 64 per GPU for 12k sequences with 8 GPUs
+    run_task "emp_$task" 12288 $((BASE_BATCH_SIZE/2)) 3e-5 3  # 64 per GPU for 12k sequences with 8 GPUs
 done
 
 # Promoter core tasks - originally 20, we'll use 2048 for much more context
 # These short classification tasks can still use very large batch sizes
 run_task "prom_core_all" 2048 $BASE_BATCH_SIZE 3e-5 4  # Full 128 per GPU
 run_task "prom_core_notata" 2048 $BASE_BATCH_SIZE 3e-5 4
-run_task "prom_core_tata" 2048 $BASE_BATCH_SIZE 3e-5 6  # More epochs for tata tasks
+run_task "prom_core_tata" 2048 $BASE_BATCH_SIZE 3e-5 10  # More epochs for tata tasks
 
 # Promoter 300 tasks - originally 70, we'll use 8192 to provide massive context
 run_task "prom_300_all" 8192 $((BASE_BATCH_SIZE/2)) 3e-5 4  # 64 per GPU
 run_task "prom_300_notata" 8192 $((BASE_BATCH_SIZE/2)) 3e-5 4
-run_task "prom_300_tata" 8192 $((BASE_BATCH_SIZE/2)) 3e-5 6  # More epochs for tata tasks
+run_task "prom_300_tata" 8192 $((BASE_BATCH_SIZE/2)) 3e-5 10  # More epochs for tata tasks
 
 # Splice site task - originally 80, we'll use 12288 (double pre-training length)
 # With 8x H200 GPUs, we can test extreme extrapolation for splice contexts
-run_task "splice_reconstructed" 12288 $((BASE_BATCH_SIZE/2)) 2e-5 5  # 64 per GPU
+run_task "splice_reconstructed" 12288 $((BASE_BATCH_SIZE/2)) 3e-5 5  # 64 per GPU
 
 # Virus task - originally 256, we'll use 24576 (max_inference_length)
 # With 8x H200 GPUs, we can test the absolute maximum extrapolation capability
 # Virus genomes are long and will benefit enormously from this length
-run_task "virus_covid" 24576 $((BASE_BATCH_SIZE/4)) 2e-5 6  # 32 per GPU even for maximum length sequences
+run_task "virus_covid" 24576 $((BASE_BATCH_SIZE/4)) 3e-5 8  # 32 per GPU even for maximum length sequences
 
 # Mouse tasks - originally 30, we'll use 8192 to test extensive genomic context
 # With 8x H200 GPUs, we can provide massive flanking regions
