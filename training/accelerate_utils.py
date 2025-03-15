@@ -22,6 +22,7 @@ from modeling.alibi_attention import create_genomic_bert_config, create_genomic_
 from training.train_utils import (
     generate_test_sequences,
     test_sequence_length_extrapolation,
+    test_tokenizer_oov_handling,
     setup_mlm_data_collator
 )
 
@@ -438,15 +439,16 @@ def train_with_accelerate(args, accelerator):
             model, optimizer, lr_scheduler, tokenizer
         )
 
+    # MODIFIED SECTION: Save final model without wait_for_everyone()
     try:
-        # First save the model (all processes participate)
-        final_dir = os.path.join(args.output_dir, "final")
-        logger.info(f"Saving final model to {final_dir}")
-        save_model(accelerator, model, tokenizer, final_dir)
+        if accelerator.is_main_process:
+            final_dir = os.path.join(args.output_dir, "final")
+            logger.info(f"Saving final model to {final_dir}")
+            save_model(accelerator, model, tokenizer, final_dir)
 
-        # Now run the extrapolation test (function handles process coordination)
-        logger.info("\nFinal length extrapolation test:")
-        test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
+            # Final length extrapolation test (only on main process)
+            logger.info("\nFinal length extrapolation test:")
+            test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
     except Exception as e:
         logger.error(f"Error during final model saving or testing: {e}")
         if accelerator.is_main_process:
@@ -679,9 +681,6 @@ def resume_from_checkpoint(accelerator, args, num_update_steps_per_epoch):
 
 def save_model(accelerator, model, tokenizer, output_dir):
     """Save the model and tokenizer using Accelerate with improved robustness for distributed training."""
-    # Synchronize all processes before saving
-    accelerator.wait_for_everyone()
-
     # Create output directory if needed
     if accelerator.is_main_process:
         os.makedirs(output_dir, exist_ok=True)
@@ -715,8 +714,8 @@ def save_model(accelerator, model, tokenizer, output_dir):
             except Exception as e:
                 logger.error(f"Error saving tokenizer: {e}")
 
-    # Re-synchronize all processes after saving
-    accelerator.wait_for_everyone()
+    # No need to wait for other processes - this was causing the timeout
+    # Removed: accelerator.wait_for_everyone()
 
 def verify_model_tokenizer_compatibility(model, tokenizer):
     # First, fix any token ID issues in the tokenizer
