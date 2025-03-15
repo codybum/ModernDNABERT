@@ -445,19 +445,32 @@ def train_with_accelerate(args, accelerator):
             # Create a standalone copy of the model for testing
             logger.info("\nPreparing model for final length extrapolation test...")
             test_model = accelerator.unwrap_model(model)
+
             # Create a fresh copy to fully detach from distributed state
             test_model = copy.deepcopy(test_model)
-            # Move to CPU to avoid any distributed GPU operations
-            test_model = test_model.to('cpu')
+
+            # Keep model on GPU for final test (just like initial test)
+            # Get the current GPU device
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            test_model = test_model.to(device)
             test_model.eval()
+
+            # Create a GPU accelerator reference similar to the original one
+            class SimpleGPUAccelerator:
+                def __init__(self, device):
+                    self.device = device
+
+                def unwrap_model(self, model):
+                    return model
+
+            gpu_accelerator = SimpleGPUAccelerator(device)
 
             # Final length extrapolation test
             logger.info("\nFinal length extrapolation test:")
-            # Use a CPU-specific accelerator reference to avoid DDP operations
-            cpu_accelerator = type('CPUAccelerator', (), {'device': torch.device('cpu'), 'unwrap_model': lambda x: x})()
-            test_sequence_length_extrapolation(cpu_accelerator, test_model, tokenizer, extrapolation_test_seqs)
+            test_sequence_length_extrapolation(gpu_accelerator, test_model, tokenizer, extrapolation_test_seqs)
     except Exception as e:
         logger.error(f"Error during final model saving or testing: {e}")
+        logger.exception("Detailed traceback:")  # Print full traceback for debugging
         if accelerator.is_main_process:
             logger.info("Training completed but final model saving failed. Use the last checkpoint instead.")
 
