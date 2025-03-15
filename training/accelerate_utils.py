@@ -354,6 +354,15 @@ def train_with_accelerate(args, accelerator):
     is_distributed = accelerator.num_processes > 1
     has_sampler = is_distributed  # True if we're using a DistributedSampler
 
+    # Before preparing with accelerator, set an attribute that will control DDP wrapping
+    if hasattr(accelerator, 'state'):
+        # Create _ddp_kwargs attribute if it doesn't exist
+        if not hasattr(accelerator.state, '_ddp_kwargs'):
+            accelerator.state._ddp_kwargs = {}
+        # Add find_unused_parameters to the DDP kwargs
+        accelerator.state._ddp_kwargs['find_unused_parameters'] = True
+        logger.info("Enabled find_unused_parameters for DDP")
+
     # Prepare with accelerator
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, lr_scheduler
