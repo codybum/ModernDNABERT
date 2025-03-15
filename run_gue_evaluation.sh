@@ -10,7 +10,7 @@ TOKENIZER_PATH=$2
 GUE_PATH=$3
 OUTPUT_DIR="./gue_results"
 USE_ALIBI=true
-NUM_GPUS=8  # Default to 8 GPUs since that's what's being used
+NUM_GPUS=8  # Using 8 GPUs as reported
 
 # Check if required arguments are provided
 if [ -z "$MODEL_PATH" ] || [ -z "$TOKENIZER_PATH" ] || [ -z "$GUE_PATH" ]; then
@@ -42,24 +42,37 @@ run_task() {
 
     echo "==================================================================="
     echo "Evaluating on $TASK_NAME with max_length=$MAX_LENGTH, batch_size=$BATCH_SIZE"
-    echo "Using $NUM_GPUS GPUs with distributed training"
     echo "==================================================================="
 
     # If multiple GPUs are available, use DistributedDataParallel
-    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS evaluate_gue.py \
-        --model_path $MODEL_PATH \
-        --tokenizer_path $TOKENIZER_PATH \
-        --gue_path $GUE_PATH \
-        --output_dir $OUTPUT_DIR \
-        --tasks $TASK_NAME \
-        --max_length $MAX_LENGTH \
-        --batch_size $BATCH_SIZE \
-        --learning_rate $LEARNING_RATE \
-        --epochs $EPOCHS \
-        --use_alibi
+    if [ $NUM_GPUS -gt 1 ]; then
+        CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python evaluate_gue.py \
+            --model_path $MODEL_PATH \
+            --tokenizer_path $TOKENIZER_PATH \
+            --gue_path $GUE_PATH \
+            --output_dir $OUTPUT_DIR \
+            --tasks $TASK_NAME \
+            --max_length $MAX_LENGTH \
+            --batch_size $BATCH_SIZE \
+            --learning_rate $LEARNING_RATE \
+            --epochs $EPOCHS \
+            --use_alibi
+    else
+        python evaluate_gue.py \
+            --model_path $MODEL_PATH \
+            --tokenizer_path $TOKENIZER_PATH \
+            --gue_path $GUE_PATH \
+            --output_dir $OUTPUT_DIR \
+            --tasks $TASK_NAME \
+            --max_length $MAX_LENGTH \
+            --batch_size $BATCH_SIZE \
+            --learning_rate $LEARNING_RATE \
+            --epochs $EPOCHS \
+            --use_alibi
+    fi
 }
 
-echo "Starting optimized GUE evaluation for ALiBi model on 8x H200 GPUs (total 1152GB VRAM)..."
+echo "Starting optimized GUE evaluation for ALiBi model with 8 GPUs (each with 144GB VRAM)..."
 echo "Model path: $MODEL_PATH"
 echo "Tokenizer path: $TOKENIZER_PATH"
 echo "GUE data path: $GUE_PATH"
@@ -67,8 +80,7 @@ echo "Output directory: $OUTPUT_DIR"
 echo "Number of GPUs: $NUM_GPUS"
 echo "Using ALiBi attention: $USE_ALIBI"
 echo "Model was trained with pre_training_length=6144, max_inference_length=24576"
-echo "8x H200 GPUs with 144GB VRAM each allows for massive batch sizes and extreme sequence lengths"
-echo "Current configuration uses batch sizes 32-128 per GPU and sequence lengths up to 24576"
+echo "Current configuration uses massive batch sizes and sequence lengths to utilize GPU resources"
 
 # Calculate batch size based on having 8 GPUs with 144GB VRAM each
 # With such massive GPU memory and low utilization reported, we need to dramatically increase batch sizes
