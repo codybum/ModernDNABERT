@@ -5,17 +5,16 @@ GUE evaluation script for ModernDNABERT.
 This script fine-tunes and evaluates ModernDNABERT on the GUE benchmark,
 using the ALiBi attention mechanism for improved sequence handling.
 """
-
 import os
 import argparse
 import logging
 import json
 import torch
 import numpy as np
-from pathlib import Path
 from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef, precision_score, recall_score
+from typing import Optional
 
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from transformers import (
     Trainer, TrainingArguments, PretrainedConfig,
     set_seed
