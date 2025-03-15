@@ -13,6 +13,8 @@ import torch
 from transformers import get_scheduler, BertForMaskedLM
 from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration
+from accelerate import DistributedDataParallelKwargs
+
 from tqdm import tqdm
 
 from data.data_collator import GenomicDataset, GenomicMLMDataCollator
@@ -474,7 +476,11 @@ def train_with_accelerate(args, accelerator):
         if accelerator.is_main_process:
             logger.info("Training completed but final model saving failed. Use the last checkpoint instead.")
 
-    logger.info("Training complete!")
+    # At the end of your train_with_accelerate function
+    accelerator.wait_for_everyone()
+    # Let Accelerate handle cleanup operations
+    if accelerator.is_main_process:
+        logger.info("Training completed, performing final cleanup")
 
 def prepare_alibi_model_for_ddp(model):
     """
@@ -525,8 +531,9 @@ def setup_accelerator(args):
     Returns:
         Accelerator instance
     """
-    # Import required classes from accelerate
-    from accelerate import DistributedDataParallelKwargs
+
+    if args.gpu_ids and "CUDA_VISIBLE_DEVICES" not in os.environ:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_ids
 
     # Create DDP kwargs configuration
     ddp_kwargs = DistributedDataParallelKwargs(
