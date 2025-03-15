@@ -277,12 +277,19 @@ def load_model_for_classification(model_path, tokenizer, num_labels):
     logger.info(f"Creating sequence classification model with {num_labels} labels")
     model = ModernDNABERTForSequenceClassification(bert_model, num_labels)
 
-    # Step 9: Add DDP-specific settings to model
+    # Step 9: Add DDP-specific settings to model - with SAFER ATTRIBUTE ACCESS
     if uses_alibi:
-        if hasattr(model.bert.embeddings, 'position_embeddings'):
-            # Freeze position embeddings to prevent DDP sync issues
-            model.bert.embeddings.position_embeddings.requires_grad = False
-            logger.info("Froze position embeddings for distributed training compatibility")
+        # Carefully check each level of the attribute hierarchy
+        if hasattr(model, 'bert'):
+            bert_module = model.bert
+            # Next check if bert has embeddings
+            if hasattr(bert_module, 'embeddings'):
+                embeddings_module = bert_module.embeddings
+                # Finally check for position_embeddings
+                if hasattr(embeddings_module, 'position_embeddings'):
+                    # Freeze position embeddings to prevent DDP sync issues
+                    embeddings_module.position_embeddings.requires_grad = False
+                    logger.info("Froze position embeddings for distributed training compatibility")
 
     return model
 
