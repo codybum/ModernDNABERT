@@ -168,7 +168,7 @@ def modify_bert_attention(model, attention_type):
 def train_with_accelerate(args, accelerator):
     """
     Main training function using Accelerate with support for selectable attention mechanisms.
-    This version fixes the RNG synchronization issues with Python 3.12.
+    This version fixes the RNG synchronization issues with Python 3.12 and DDP issues with ALiBi.
 
     Args:
         args: Command-line arguments
@@ -259,6 +259,9 @@ def train_with_accelerate(args, accelerator):
             max_supported_length=args.max_supported_model_length,
         )
         model = create_genomic_bert_model(config)
+
+    # CRITICAL FIX: Prepare model for DDP if using ALiBi attention
+    model = prepare_alibi_model_for_ddp(model)
 
     # CRITICAL FIX: Verify and synchronize model-tokenizer compatibility
     model = verify_model_tokenizer_compatibility(model, tokenizer)
@@ -354,17 +357,7 @@ def train_with_accelerate(args, accelerator):
     is_distributed = accelerator.num_processes > 1
     has_sampler = is_distributed  # True if we're using a DistributedSampler
 
-    # Before preparing with accelerator, set an attribute that will control DDP wrapping
-    if hasattr(accelerator, 'state'):
-        # Create _ddp_kwargs attribute if it doesn't exist
-        if not hasattr(accelerator.state, '_ddp_kwargs'):
-            accelerator.state._ddp_kwargs = {}
-        # Add find_unused_parameters to the DDP kwargs
-        accelerator.state._ddp_kwargs['find_unused_parameters'] = True
-        accelerator.state._ddp_kwargs['static_graph'] = False
-        logger.info("Enabled find_unused_parameters for DDP")
-
-    # Prepare with accelerator
+    # Prepare with accelerator - DDP kwargs should be properly set from setup_accelerator
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, lr_scheduler
     )
@@ -495,8 +488,64 @@ def train_with_accelerate(args, accelerator):
 
     logger.info("Training complete!")
 
+def prepare_alibi_model_for_ddp(model):
+    """
+    Prepare an ALiBi model for DDP by handling unused position embeddings.
+    When using ALiBi attention, position embeddings aren't used in forward pass
+    but still exist in the model, causing DDP to complain about unused parameters.
+
+    Args:
+        model: The BERT model with ALiBi attention
+
+    Returns:
+        The prepared model
+    """
+    logger.info("Preparing ALiBi model for distributed training")
+
+    # Check if model uses ALiBi attention
+    is_alibi = getattr(model.config, 'use_alibi', False) or getattr(model.config, 'attention_type', '') == 'alibi'
+    if not is_alibi:
+        logger.info("Model does not use ALiBi attention, no special preparation needed")
+        return model
+
+    # Handle position embeddings
+    try:
+        # Check if position embeddings exist
+        if hasattr(model.bert.embeddings, 'position_embeddings'):
+            logger.info("Handling position embeddings for ALiBi model")
+
+            # Freeze position embeddings to prevent gradient issues in DDP
+            model.bert.embeddings.position_embeddings.requires_grad = False
+            logger.info("Froze position embeddings for ALiBi model")
+
+            # Set initialization flag in config to track this change
+            model.config.position_embeddings_frozen = True
+    except Exception as e:
+        logger.warning(f"Error preparing ALiBi model for DDP: {e}")
+
+    return model
+
 
 def setup_accelerator(args):
+    """
+    Set up Accelerator with proper configuration for distributed training.
+    Compatible with the latest version of Accelerate library.
+
+    Args:
+        args: Command-line arguments
+
+    Returns:
+        Accelerator instance
+    """
+    # Import required classes from accelerate
+    from accelerate import DistributedDataParallelKwargs
+
+    # Create DDP kwargs configuration
+    ddp_kwargs = DistributedDataParallelKwargs(
+        find_unused_parameters=True,
+        static_graph=False
+    )
+
     # Create checkpoint configuration
     project_config = None
     if args.output_dir:
@@ -510,11 +559,12 @@ def setup_accelerator(args):
     if torch.cuda.is_available():
         device_placement_config = {"device_map": "auto"}
 
-    # Create accelerator with explicit device mapping
+    # Create accelerator with explicit DDP kwargs
     accelerator_config = {
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "project_config": project_config,
         "device_placement": device_placement_config,
+        "kwargs_handlers": [ddp_kwargs],  # Use kwargs_handlers for latest Accelerate
     }
 
     if hasattr(args, 'log_with_tensorboard') and args.log_with_tensorboard:
@@ -536,6 +586,7 @@ def setup_accelerator(args):
     logger.info(f"  Process index: {accelerator.process_index}")
     logger.info(f"  Device: {accelerator.device}")
     logger.info(f"  Mixed precision: {accelerator.mixed_precision}")
+    logger.info(f"  DDP kwargs: find_unused_parameters=True, static_graph=False")
 
     return accelerator
 
