@@ -30,24 +30,39 @@ from training.train_utils import (
 logger = logging.getLogger(__name__)
 
 
-def ensure_valid_batch_indices(batch, tokenizer, model):
+def ensure_valid_batch_indices(batch, tokenizer, model, accelerator=None):
     """
     Ensure all token IDs in a batch are within the valid vocabulary range.
+    Compatible with Accelerate's model wrapping.
 
     Args:
         batch: The batch of inputs
         tokenizer: The tokenizer
-        model: The model
+        model: The model (might be wrapped by Accelerate)
+        accelerator: Optional accelerator instance for unwrapping the model
 
     Returns:
         Updated batch with validated indices
     """
-    # Original function code unchanged
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # If no input_ids, nothing to validate
     if 'input_ids' not in batch:
         return batch
 
+    # Get the base model from any wrappers (like DistributedDataParallel)
+    unwrapped_model = model
+
+    # If we have an accelerator, use it to unwrap the model
+    if accelerator is not None:
+        unwrapped_model = accelerator.unwrap_model(model)
+    # Fallback for DistributedDataParallel if no accelerator is available
+    elif hasattr(model, 'module'):
+        unwrapped_model = model.module
+
     # Get model's vocabulary size (embedding dimension)
-    embedding_size = model.get_input_embeddings().weight.shape[0]
+    embedding_size = unwrapped_model.get_input_embeddings().weight.shape[0]
 
     # Check if any indices are out of bounds
     input_ids = batch['input_ids']
@@ -81,7 +96,6 @@ def ensure_valid_batch_indices(batch, tokenizer, model):
                                               batch['labels'])
 
     return batch
-
 
 def modify_bert_attention(model, attention_type):
     """
@@ -710,10 +724,15 @@ def verify_model_tokenizer_compatibility(model, tokenizer):
 
 def safe_training_step(model, batch, accelerator, args):
     """Execute a single training step with robust error handling."""
+    import torch
+    import gc
+    import logging
+    logger = logging.getLogger(__name__)
+
     try:
-        # Validate token IDs before forward pass
+        # Validate token IDs before forward pass - pass the accelerator
         tokenizer = getattr(accelerator.unwrap_model(model).config, 'tokenizer', None)
-        batch = ensure_valid_batch_indices(batch, tokenizer, model)
+        batch = ensure_valid_batch_indices(batch, tokenizer, model, accelerator)
 
         # Check available GPU memory
         if torch.cuda.is_available():
@@ -783,6 +802,10 @@ def safe_training_step(model, batch, accelerator, args):
 
 def _process_in_micro_batches(model, batch, accelerator, args, micro_batch_size=1):
     """Process a batch in smaller micro-batches to handle memory constraints."""
+    import torch
+    import logging
+    logger = logging.getLogger(__name__)
+
     # Get the original batch size
     full_batch_size = batch['input_ids'].shape[0]
 
@@ -803,9 +826,9 @@ def _process_in_micro_batches(model, batch, accelerator, args, micro_batch_size=
         # Create micro-batch
         micro_batch = {k: v[i:end_idx] for k, v in batch.items()}
 
-        # Validate token IDs in micro-batch
+        # Validate token IDs in micro-batch - pass the accelerator
         tokenizer = getattr(accelerator.unwrap_model(model).config, 'tokenizer', None)
-        micro_batch = ensure_valid_batch_indices(micro_batch, tokenizer, model)
+        micro_batch = ensure_valid_batch_indices(micro_batch, tokenizer, model, accelerator)
 
         # Forward pass
         outputs = model(**micro_batch)
