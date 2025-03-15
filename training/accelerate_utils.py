@@ -154,8 +154,7 @@ def modify_bert_attention(model, attention_type):
 def train_with_accelerate(args, accelerator):
     """
     Main training function using Accelerate with support for selectable attention mechanisms.
-
-    Modified to load pre-trained tokenizer instead of training it.
+    This version fixes the RNG synchronization issues with Python 3.12.
 
     Args:
         args: Command-line arguments
@@ -270,15 +269,37 @@ def train_with_accelerate(args, accelerator):
         max_seq_length=args.pre_training_length  # Pass pre_training_length to collator
     )
 
-    # Configure data loader
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        collate_fn=data_collator,
-        shuffle=True,
-        num_workers=0,  # Set to 0 to avoid multiprocessing pickling issues
-        pin_memory=torch.cuda.is_available(),
-    )
+    # Configure data loader - THIS IS THE KEY CHANGE FOR FIXING RNG ISSUES
+    # Using a deterministic sampler instead of relying on Accelerate's RNG sync
+    if accelerator.num_processes > 1:
+        # Create a deterministic distributed sampler
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_dataset,
+            num_replicas=accelerator.num_processes,
+            rank=accelerator.process_index,
+            shuffle=True,
+            seed=args.seed,
+            drop_last=False
+        )
+
+        train_dataloader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            collate_fn=data_collator,
+            num_workers=0,  # Avoid worker processes to prevent RNG issues
+            pin_memory=torch.cuda.is_available(),
+            sampler=train_sampler
+        )
+    else:
+        # Single-process mode
+        train_dataloader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            collate_fn=data_collator,
+            shuffle=True,
+            num_workers=0,  # Avoid worker processes to prevent RNG issues
+            pin_memory=torch.cuda.is_available()
+        )
 
     # Prepare optimizer
     no_decay = ["bias", "LayerNorm.weight"]
@@ -315,10 +336,19 @@ def train_with_accelerate(args, accelerator):
         args.max_supported_model_length = args.test_sequence_length
         model.config.max_supported_length = min(getattr(model.config, "max_supported_length", 4096), 4096)
 
+    # Before preparing with accelerator, store the distributed state
+    is_distributed = accelerator.num_processes > 1
+    has_sampler = is_distributed  # True if we're using a DistributedSampler
+
     # Prepare with accelerator
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, lr_scheduler
     )
+
+    # CRITICAL FIX: If dataloader has rng_types, disable it to prevent synchronization issues
+    if hasattr(train_dataloader, "rng_types"):
+        train_dataloader.rng_types = []
+        logger.info("Disabled RNG synchronization in DataLoader to prevent 'Invalid mt19937 state' errors")
 
     # Generate test sequences for extrapolation testing
     test_lengths = [
@@ -351,6 +381,8 @@ def train_with_accelerate(args, accelerator):
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {max_train_steps}")
+    logger.info(f"  Using distributed sampler: {has_sampler}")
+    logger.info(f"  RNG synchronization: disabled (to fix 'Invalid mt19937 state' errors)")
 
     # Setup progress bar (only on main process)
     progress_bar = tqdm(range(max_train_steps), disable=not accelerator.is_main_process)
@@ -361,6 +393,11 @@ def train_with_accelerate(args, accelerator):
         model.train()
         total_loss = 0
         valid_steps = 0  # Count successful steps for averaging
+
+        # Set epoch for distributed sampler
+        if has_sampler and hasattr(train_dataloader, "sampler") and hasattr(train_dataloader.sampler, "set_epoch"):
+            train_dataloader.sampler.set_epoch(epoch)
+            logger.info(f"Set epoch {epoch} for distributed sampler")
 
         # Report GPU memory status on main process
         if torch.cuda.is_available() and accelerator.is_main_process:
@@ -434,9 +471,18 @@ def train_with_accelerate(args, accelerator):
 
     logger.info("Training complete!")
 
-
 # The rest of the helper functions remain unchanged from the original file
 def setup_accelerator(args):
+    """
+    Set up a properly configured Accelerator instance for multi-GPU training.
+    This version includes fixes for RNG synchronization issues with Python 3.12.
+
+    Args:
+        args: Command-line arguments with training configuration
+
+    Returns:
+        Accelerator: Properly configured accelerator instance
+    """
     # Create checkpoint configuration
     project_config = None
     if args.output_dir:
@@ -452,6 +498,7 @@ def setup_accelerator(args):
         device_placement_config = {"device_map": "auto"}
 
     # Create accelerator with explicit device mapping
+    # IMPORTANT: We don't pass rng_types here to avoid RNG synchronization issues
     accelerator_config = {
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "project_config": project_config,
@@ -464,8 +511,22 @@ def setup_accelerator(args):
     # Create accelerator
     accelerator = Accelerator(**accelerator_config)
 
-    return accelerator
+    # Explicitly disable RNG state synchronization in the state object
+    # This is the key fix for the "Invalid mt19937 state" error
+    if hasattr(accelerator, 'state'):
+        if hasattr(accelerator.state, 'sync_rng_states'):
+            accelerator.state.sync_rng_states = False
+            logger.info("Disabled RNG state synchronization to prevent 'Invalid mt19937 state' errors")
 
+    # Report accelerator configuration
+    logger.info(f"Accelerator configuration:")
+    logger.info(f"  Distributed type: {accelerator.distributed_type}")
+    logger.info(f"  Num processes: {accelerator.num_processes}")
+    logger.info(f"  Process index: {accelerator.process_index}")
+    logger.info(f"  Device: {accelerator.device}")
+    logger.info(f"  Mixed precision: {accelerator.mixed_precision}")
+
+    return accelerator
 
 def calculate_training_steps(train_dataloader, gradient_accumulation_steps, num_epochs):
     """Calculate the number of update steps for training."""
