@@ -178,6 +178,44 @@ class ModernDNABERTForSequenceClassification(torch.nn.Module):
         )
 
 
+class GenomicTrainer(Trainer):
+    """
+    Custom Trainer class that properly handles shared tensors when saving with SafeTensors.
+    This fixes the shared memory error when saving BERT models.
+    """
+
+    def _save(self, output_dir: Optional[str] = None, state_dict=None):
+        """
+        Override the _save method to handle shared weights in BERT models.
+        This prevents the SafeTensors error with shared memory tensors.
+        """
+        # Warn if not saving to output_dir
+        output_dir = output_dir if output_dir is not None else self.args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Get the state dict if not provided
+        if state_dict is None:
+            state_dict = self.model.state_dict()
+
+        # Handle shared weights by creating copies
+        cleaned_state_dict = {}
+        for key, value in state_dict.items():
+            # Create a copy of each tensor so they don't share memory
+            cleaned_state_dict[key] = value.clone()
+
+        # Use PyTorch's native save instead of SafeTensors
+        # This avoids issues with shared memory tensors
+        logger = self.get_logger()
+        logger.info(f"Saving model to {output_dir}")
+        torch.save(cleaned_state_dict, os.path.join(output_dir, "pytorch_model.bin"))
+
+        # Save the config
+        if hasattr(self.model, "config"):
+            self.model.config.save_pretrained(output_dir)
+
+        # Return the output directory
+        return output_dir
+
 def load_model_for_classification(model_path, tokenizer, num_labels):
     """
     Load a model with correct handling for ALiBi models and distributed training.
@@ -344,11 +382,13 @@ def evaluate_on_task(model_path, tokenizer_path, task_path, output_dir, task_nam
         fp16=torch.cuda.is_available(),
         logging_dir=os.path.join(task_output_dir, "logs"),
         logging_steps=50,
-        report_to="none"
+        report_to="none",
+        # Add these options to avoid SafeTensors error
+        save_safetensors=False,  # Disable SafeTensors saving
     )
 
-    # Set up trainer
-    trainer = Trainer(
+    # Set up trainer with custom trainer class that handles shared weights
+    trainer = GenomicTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -372,7 +412,6 @@ def evaluate_on_task(model_path, tokenizer_path, task_path, output_dir, task_nam
     logger.info(f"Results for {task_name}: {results}")
 
     return results
-
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate ModernDNABERT on GUE benchmark")
