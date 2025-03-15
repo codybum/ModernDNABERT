@@ -32,10 +32,10 @@ def generate_test_sequences(lengths=[512, 1024, 2048, 4096, 8192]):
         for length in lengths
     ]
 
-
 def test_sequence_length_extrapolation(accelerator, model, tokenizer, test_sequences: List[str]):
     """
     Test model on sequences of different lengths using the accelerator device.
+    Modified to safely handle distributed training scenarios.
 
     Args:
         accelerator: Accelerator instance
@@ -46,12 +46,24 @@ def test_sequence_length_extrapolation(accelerator, model, tokenizer, test_seque
     Returns:
         List of test results
     """
-    # Use the model on its current device through accelerator
-    model.eval()
+    # Only run the test on the main process
+    if not accelerator.is_main_process:
+        # Wait for main process to finish
+        accelerator.wait_for_everyone()
+        return []
+
+    # Unwrap the model for testing to avoid distributed communication
+    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model.eval()
 
     logger.info("\n" + "=" * 50)
     logger.info(f"RUNNING LENGTH EXTRAPOLATION TEST ON {str(accelerator.device).upper()}")
     logger.info("=" * 50)
+
+    # Create a local copy to prevent modifying the original model's state
+    import copy
+    test_model = copy.deepcopy(unwrapped_model)
+    test_model.to(accelerator.device)
 
     results = []
     for seq in test_sequences:
@@ -73,7 +85,7 @@ def test_sequence_length_extrapolation(accelerator, model, tokenizer, test_seque
             try:
                 encoding = tokenizer(
                     seq,
-                    truncation=True,  # Enable truncation for safety
+                    truncation=True,
                     padding=False,
                     return_tensors="pt"
                 )
@@ -96,11 +108,11 @@ def test_sequence_length_extrapolation(accelerator, model, tokenizer, test_seque
                     labels = encoding["input_ids"].clone()
                     encoding["labels"] = labels
 
-                    # Move tensors to accelerator device
+                    # Move tensors to correct device
                     encoding = {k: v.to(accelerator.device) for k, v in encoding.items()}
 
-                    # Run inference
-                    outputs = model(**encoding)
+                    # Run inference on the local test model
+                    outputs = test_model(**encoding)
 
                     # Record success and perplexity
                     perplexity = torch.exp(outputs.loss).item() if hasattr(outputs, 'loss') else None
@@ -124,12 +136,12 @@ def test_sequence_length_extrapolation(accelerator, model, tokenizer, test_seque
                             # Move to CPU for this sequence only
                             cpu_encoding = {k: v.to('cpu') for k, v in encoding.items()}
 
-                            cpu_model = accelerator.unwrap_model(model).to('cpu')
+                            # Create a CPU-only copy of the model
+                            cpu_model = copy.deepcopy(test_model).to('cpu')
                             cpu_outputs = cpu_model(**cpu_encoding)
 
                             # Calculate perplexity and record
-                            cpu_perplexity = torch.exp(cpu_outputs.loss).item() if hasattr(cpu_outputs,
-                                                                                           'loss') else None
+                            cpu_perplexity = torch.exp(cpu_outputs.loss).item() if hasattr(cpu_outputs, 'loss') else None
                             results.append({
                                 "length": seq_length,
                                 "success": True,
@@ -139,8 +151,9 @@ def test_sequence_length_extrapolation(accelerator, model, tokenizer, test_seque
                             })
                             logger.info(f"✓ Successfully processed sequence of length {seq_length} on CPU fallback")
 
-                            # Move model back to original device
-                            accelerator.unwrap_model(model).to(accelerator.device)
+                            # Clean up CPU model to save memory
+                            del cpu_model
+                            torch.cuda.empty_cache()
                         except Exception as cpu_e:
                             logger.error(f"CPU fallback also failed: {cpu_e}")
                             results.append({
@@ -176,7 +189,11 @@ def test_sequence_length_extrapolation(accelerator, model, tokenizer, test_seque
         logger.info("\nFailed to handle any test sequences")
 
     # Clean up memory
+    del test_model
     torch.cuda.empty_cache()
+
+    # Let other processes continue
+    accelerator.wait_for_everyone()
 
     return results
 
