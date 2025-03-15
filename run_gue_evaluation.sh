@@ -10,7 +10,7 @@ TOKENIZER_PATH=$2
 GUE_PATH=$3
 OUTPUT_DIR="./gue_results"
 USE_ALIBI=true
-NUM_GPUS=1
+NUM_GPUS=8  # Default to 8 GPUs since that's what's being used
 
 # Check if required arguments are provided
 if [ -z "$MODEL_PATH" ] || [ -z "$TOKENIZER_PATH" ] || [ -z "$GUE_PATH" ]; then
@@ -42,37 +42,24 @@ run_task() {
 
     echo "==================================================================="
     echo "Evaluating on $TASK_NAME with max_length=$MAX_LENGTH, batch_size=$BATCH_SIZE"
+    echo "Using $NUM_GPUS GPUs with distributed training"
     echo "==================================================================="
 
     # If multiple GPUs are available, use DistributedDataParallel
-    if [ $NUM_GPUS -gt 1 ]; then
-        CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS evaluate_gue.py \
-            --model_path $MODEL_PATH \
-            --tokenizer_path $TOKENIZER_PATH \
-            --gue_path $GUE_PATH \
-            --output_dir $OUTPUT_DIR \
-            --tasks $TASK_NAME \
-            --max_length $MAX_LENGTH \
-            --batch_size $BATCH_SIZE \
-            --learning_rate $LEARNING_RATE \
-            --epochs $EPOCHS \
-            --use_alibi
-    else
-        python evaluate_gue.py \
-            --model_path $MODEL_PATH \
-            --tokenizer_path $TOKENIZER_PATH \
-            --gue_path $GUE_PATH \
-            --output_dir $OUTPUT_DIR \
-            --tasks $TASK_NAME \
-            --max_length $MAX_LENGTH \
-            --batch_size $BATCH_SIZE \
-            --learning_rate $LEARNING_RATE \
-            --epochs $EPOCHS \
-            --use_alibi
-    fi
+    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS evaluate_gue.py \
+        --model_path $MODEL_PATH \
+        --tokenizer_path $TOKENIZER_PATH \
+        --gue_path $GUE_PATH \
+        --output_dir $OUTPUT_DIR \
+        --tasks $TASK_NAME \
+        --max_length $MAX_LENGTH \
+        --batch_size $BATCH_SIZE \
+        --learning_rate $LEARNING_RATE \
+        --epochs $EPOCHS \
+        --use_alibi
 }
 
-echo "Starting optimized GUE evaluation for ALiBi model on H200 GPU (144GB VRAM)..."
+echo "Starting optimized GUE evaluation for ALiBi model on 8x H200 GPUs (total 1152GB VRAM)..."
 echo "Model path: $MODEL_PATH"
 echo "Tokenizer path: $TOKENIZER_PATH"
 echo "GUE data path: $GUE_PATH"
@@ -80,48 +67,49 @@ echo "Output directory: $OUTPUT_DIR"
 echo "Number of GPUs: $NUM_GPUS"
 echo "Using ALiBi attention: $USE_ALIBI"
 echo "Model was trained with pre_training_length=6144, max_inference_length=24576"
-echo "H200 GPU with 144GB VRAM allows for larger batch sizes and sequence lengths"
+echo "8x H200 GPUs with 144GB VRAM each allows for massive batch sizes and extreme sequence lengths"
+echo "Current configuration uses batch sizes 32-128 per GPU and sequence lengths up to 24576"
 
-# Calculate batch size based on available GPUs and H200's 144GB VRAM
-# With such large GPU memory, we can use much larger batch sizes
-BASE_BATCH_SIZE=16  # Per GPU for medium-length sequences
+# Calculate batch size based on having 8 GPUs with 144GB VRAM each
+# With such massive GPU memory and low utilization reported, we need to dramatically increase batch sizes
+BASE_BATCH_SIZE=128  # Per GPU for medium-length sequences - using much larger batches
 
-# EMP tasks - originally 128, now using 6144 to fully match your pre-training length
-# These are epigenetic marker prediction tasks with full genomic context
+# EMP tasks - originally 128, now using 12288 (double pre-training length) to test extrapolation
+# With 8x144GB GPUs, we can push sequence lengths far beyond pre-training
 for task in H3 H3K14ac H3K36me3 H3K4me1 H3K4me2 H3K4me3 H3K79me3 H3K9ac H4 H4ac; do
-    run_task "emp_$task" 6144 $((BASE_BATCH_SIZE/2)) 2e-5 3  # With 144GB VRAM, we can handle larger batches even at full length
+    run_task "emp_$task" 12288 $((BASE_BATCH_SIZE/2)) 2e-5 3  # 64 per GPU for 12k sequences with 8 GPUs
 done
 
-# Promoter core tasks - originally 20, we'll use 1024 for more context
-# Even for these short classification tasks, more context can be beneficial with H200's large memory
-run_task "prom_core_all" 1024 $BASE_BATCH_SIZE 3e-5 4
-run_task "prom_core_notata" 1024 $BASE_BATCH_SIZE 3e-5 4
-run_task "prom_core_tata" 1024 $BASE_BATCH_SIZE 3e-5 6  # More epochs for tata tasks
+# Promoter core tasks - originally 20, we'll use 2048 for much more context
+# These short classification tasks can still use very large batch sizes
+run_task "prom_core_all" 2048 $BASE_BATCH_SIZE 3e-5 4  # Full 128 per GPU
+run_task "prom_core_notata" 2048 $BASE_BATCH_SIZE 3e-5 4
+run_task "prom_core_tata" 2048 $BASE_BATCH_SIZE 3e-5 6  # More epochs for tata tasks
 
-# Promoter 300 tasks - originally 70, we'll use 4096 to provide substantial context
-run_task "prom_300_all" 4096 $((BASE_BATCH_SIZE/2)) 3e-5 4
-run_task "prom_300_notata" 4096 $((BASE_BATCH_SIZE/2)) 3e-5 4
-run_task "prom_300_tata" 4096 $((BASE_BATCH_SIZE/2)) 3e-5 6  # More epochs for tata tasks
+# Promoter 300 tasks - originally 70, we'll use 8192 to provide massive context
+run_task "prom_300_all" 8192 $((BASE_BATCH_SIZE/2)) 3e-5 4  # 64 per GPU
+run_task "prom_300_notata" 8192 $((BASE_BATCH_SIZE/2)) 3e-5 4
+run_task "prom_300_tata" 8192 $((BASE_BATCH_SIZE/2)) 3e-5 6  # More epochs for tata tasks
 
-# Splice site task - originally 80, we'll use 6144 (full pre-training length)
-# With H200's memory, we can maximize context for splice sites
-run_task "splice_reconstructed" 6144 $((BASE_BATCH_SIZE/2)) 2e-5 5
+# Splice site task - originally 80, we'll use 12288 (double pre-training length)
+# With 8x H200 GPUs, we can test extreme extrapolation for splice contexts
+run_task "splice_reconstructed" 12288 $((BASE_BATCH_SIZE/2)) 2e-5 5  # 64 per GPU
 
-# Virus task - originally 256, we'll use maximum inference length of 12288
-# H200 has enough memory to fully leverage your model's extrapolation capabilities
+# Virus task - originally 256, we'll use 24576 (max_inference_length)
+# With 8x H200 GPUs, we can test the absolute maximum extrapolation capability
 # Virus genomes are long and will benefit enormously from this length
-run_task "virus_covid" 12288 $((BASE_BATCH_SIZE/4)) 2e-5 6  # Reduced batch size for extremely long sequences
+run_task "virus_covid" 24576 $((BASE_BATCH_SIZE/4)) 2e-5 6  # 32 per GPU even for maximum length sequences
 
-# Mouse tasks - originally 30, we'll use 4096 to leverage substantial genomic context
-# With H200's memory, we can provide extensive flanking regions
+# Mouse tasks - originally 30, we'll use 8192 to test extensive genomic context
+# With 8x H200 GPUs, we can provide massive flanking regions
 for i in {0..4}; do
-    run_task "mouse_$i" 4096 $((BASE_BATCH_SIZE/2)) 3e-5 5
+    run_task "mouse_$i" 8192 $((BASE_BATCH_SIZE/2)) 3e-5 5  # 64 per GPU
 done
 
-# Transcription factor tasks - originally 30, we'll use 4096
+# Transcription factor tasks - originally 30, we'll use 8192
 # TF binding predictions greatly benefit from extensive sequence context
 for i in {0..4}; do
-    run_task "tf_$i" 4096 $((BASE_BATCH_SIZE/2)) 3e-5 4
+    run_task "tf_$i" 8192 $((BASE_BATCH_SIZE/2)) 3e-5 4  # 64 per GPU
 done
 
 echo "GUE evaluation completed. Results saved to $OUTPUT_DIR"
