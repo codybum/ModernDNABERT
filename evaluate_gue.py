@@ -215,6 +215,7 @@ class GenomicTrainer(Trainer):
         # Return the output directory
         return output_dir
 
+
 def load_model_for_classification(model_path, tokenizer, num_labels):
     """
     Load a model with correct handling for ALiBi models and distributed training.
@@ -238,9 +239,10 @@ def load_model_for_classification(model_path, tokenizer, num_labels):
         original_max_position = getattr(config, 'max_position_embeddings', 512)
         logger.info(f"Original max_position_embeddings: {original_max_position}")
 
-        # Set max_position_embeddings to 512 for classification tasks
-        # But don't change it yet - we'll handle this in the state dict
-        config.max_position_embeddings = original_max_position
+        # Log key model dimensions
+        logger.info(f"Model dimensions from config: hidden_size={config.hidden_size}, "
+                    f"num_attention_heads={config.num_attention_heads}, "
+                    f"num_hidden_layers={config.num_hidden_layers}")
     else:
         # If no config, create one with default position embeddings size
         logger.info(f"No config.json found, creating default config")
@@ -278,28 +280,23 @@ def load_model_for_classification(model_path, tokenizer, num_labels):
     else:
         raise FileNotFoundError(f"No model weights found at {model_path}")
 
-    # Step 4: Modify config for creating the model
-    # For classification, we use a smaller position embedding size
-    if original_max_position != 512:
-        logger.info(f"Setting max_position_embeddings to " + str(original_max_position) + " for classification model")
-        config.max_position_embeddings = original_max_position
-
-    # Step 5: Create model with modified config
-    logger.info("Creating base BERT model")
+    # Step 4: Create model with the original config directly
+    # This ensures we preserve all dimensions from the original model
+    logger.info("Creating base BERT model with original config dimensions")
     bert_model = create_genomic_bert_model(config)
 
-    # Step 6: Handle the position embeddings in state_dict for ALiBi models
+    # Step 5: Handle the position embeddings in state_dict for ALiBi models
     if 'bert.embeddings.position_embeddings.weight' in state_dict:
         pos_embed_weight = state_dict['bert.embeddings.position_embeddings.weight']
         pretrained_size = pos_embed_weight.shape[0]
 
-        if pretrained_size != 512 and uses_alibi:
+        if pretrained_size != original_max_position and uses_alibi:
             logger.info(f"ALiBi model: Handling position embeddings tensor of size {pretrained_size}")
             # Option 1: Remove position embeddings from state dict for ALiBi models
             del state_dict['bert.embeddings.position_embeddings.weight']
             logger.info("Removed position embeddings from state dict for ALiBi model")
 
-    # Step 7: Load weights into model
+    # Step 6: Load weights into model
     logger.info("Loading weights into model")
     # Use strict=False to allow missing position embeddings in ALiBi models
     missing_keys, unexpected_keys = bert_model.load_state_dict(state_dict, strict=False)
@@ -310,11 +307,11 @@ def load_model_for_classification(model_path, tokenizer, num_labels):
     if unexpected_keys:
         logger.info(f"Unexpected keys: {unexpected_keys}")
 
-    # Step 8: Create sequence classification model
+    # Step 7: Create sequence classification model
     logger.info(f"Creating sequence classification model with {num_labels} labels")
     model = ModernDNABERTForSequenceClassification(bert_model, num_labels)
 
-    # Step 9: Add DDP-specific settings to model - with SAFER ATTRIBUTE ACCESS
+    # Step 8: Add DDP-specific settings to model - with SAFER ATTRIBUTE ACCESS
     if uses_alibi:
         # Carefully check each level of the attribute hierarchy
         if hasattr(model, 'bert'):
