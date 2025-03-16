@@ -299,11 +299,15 @@ def convert_sentencepiece_to_hf(
         raise
 
 
-def process_fasta_chunk(chunk_data):
-    """Process a chunk of a FASTA file to extract valid genomic sequences."""
+def process_file_chunk(chunk_data):
+    """
+    Process a chunk of a file to extract valid genomic sequences.
+    Supports both FASTA format and plain text with one sequence per line.
+    """
     file_path, chunk_id, start_pos, end_pos, file_size = chunk_data
     sequences = []
     current_seq = ""
+    is_fasta = None  # Will be detected
 
     try:
         with open(file_path, 'r') as f:
@@ -312,6 +316,24 @@ def process_fasta_chunk(chunk_data):
             # If not at start of file, read until next newline to avoid partial line
             if start_pos > 0:
                 f.readline()
+
+            # If we're at the beginning of the file, try to detect format
+            if start_pos == 0:
+                # Store current position to return after peeking
+                current_pos = f.tell()
+
+                # Peek at the first few lines to detect format
+                peek_lines = []
+                for _ in range(5):
+                    line = f.readline().strip()
+                    if line:
+                        peek_lines.append(line)
+
+                # Check if any line starts with '>' - indicating FASTA format
+                is_fasta = any(line.startswith('>') for line in peek_lines if line)
+
+                # Reset to where we were before peeking
+                f.seek(current_pos)
 
             # Read chunk
             bytes_read = 0
@@ -323,25 +345,43 @@ def process_fasta_chunk(chunk_data):
                     break
 
                 line = line.strip()
-                # Skip FASTA headers
-                if line.startswith('>'):
-                    if current_seq:
-                        sequences.append(current_seq)
-                        current_seq = ""
-                    continue
-                # Only accept A, T, G, C sequences, ignore others
-                if set(line.upper()) <= set('ATGC'):
-                    current_seq += line.upper()
 
-            # Add the last sequence if exists
-            if current_seq:
+                # Skip empty lines
+                if not line:
+                    continue
+
+                # For the first chunk, detect format if not already detected
+                if is_fasta is None:
+                    is_fasta = line.startswith('>')
+
+                # Process according to format
+                if is_fasta:
+                    # Handle FASTA headers
+                    if line.startswith('>'):
+                        if current_seq:
+                            sequences.append(current_seq)
+                            current_seq = ""
+                        continue
+                    # Only accept A, T, G, C sequences for FASTA content
+                    if set(line.upper()) <= set('ATGC'):
+                        current_seq += line.upper()
+                else:
+                    # Plain text format - one sequence per line
+                    # Filter to only keep A, T, G, C characters
+                    filtered_seq = ''.join(c for c in line.upper() if c in 'ATGC')
+                    if filtered_seq:
+                        sequences.append(filtered_seq)
+
+            # For FASTA format, add the last sequence if it exists
+            if is_fasta and current_seq:
                 sequences.append(current_seq)
 
         return {
             'sequences': sequences,
             'chunk_id': chunk_id,
             'bytes_processed': bytes_read,
-            'num_sequences': len(sequences)
+            'num_sequences': len(sequences),
+            'is_fasta': is_fasta
         }
     except Exception as e:
         logger.error(f"Error processing chunk {chunk_id} of file {file_path}: {e}")
@@ -349,9 +389,9 @@ def process_fasta_chunk(chunk_data):
             'sequences': [],
             'chunk_id': chunk_id,
             'bytes_processed': 0,
-            'num_sequences': 0
+            'num_sequences': 0,
+            'is_fasta': None
         }
-
 
 def update_progress(result):
     """Callback function to update progress bar"""
@@ -417,6 +457,9 @@ def cpu_optimized_prepare_data(input_files: List[str], output_file: str, sample_
     all_sequences = []
     file_chunk_size = 10 * 1024 * 1024  # 10MB chunks for file processing
 
+    # Dictionary to store file format information
+    file_formats = {}
+
     # Create multiprocessing pool
     with multiprocessing.Pool(processes=num_workers) as pool:
         for file_path in input_files:
@@ -435,20 +478,38 @@ def cpu_optimized_prepare_data(input_files: List[str], output_file: str, sample_
                 chunks = split_file_into_chunks(file_path, file_chunk_size)
                 logger.info(f"File divided into {len(chunks)} chunks for parallel processing")
 
-                # Process chunks in parallel with callback for progress updates
-                results = []
-                for chunk in chunks:
-                    result = pool.apply_async(
-                        process_fasta_chunk,
-                        args=(chunk,),
-                        callback=update_progress
-                    )
-                    results.append(result)
+                # Process the first chunk to detect file format
+                first_chunk = chunks[0]
+                first_result = process_file_chunk(first_chunk)
+                update_progress(first_result)
 
-                # Collect results
-                for result in results:
-                    result_data = result.get()
-                    all_sequences.extend(result_data['sequences'])
+                # Store file format information
+                file_formats[file_path] = first_result.get('is_fasta')
+                is_fasta = file_formats[file_path]
+
+                if is_fasta:
+                    logger.info(f"Detected FASTA format for {file_path}")
+                else:
+                    logger.info(f"Detected plain text format for {file_path}")
+
+                # Add sequences from first chunk
+                all_sequences.extend(first_result['sequences'])
+
+                # Process remaining chunks in parallel with callback for progress updates
+                if len(chunks) > 1:
+                    results = []
+                    for chunk in chunks[1:]:
+                        result = pool.apply_async(
+                            process_file_chunk,
+                            args=(chunk,),
+                            callback=update_progress
+                        )
+                        results.append(result)
+
+                    # Collect results
+                    for result in results:
+                        result_data = result.get()
+                        all_sequences.extend(result_data['sequences'])
 
             except Exception as e:
                 logger.error(f"Error processing file {file_path}: {e}")
@@ -498,7 +559,6 @@ def cpu_optimized_prepare_data(input_files: List[str], output_file: str, sample_
 
     logger.info(f"Prepared data saved to {output_file}")
     return output_file
-
 
 def cpu_optimized_train_sentencepiece(input_file: str, model_prefix: str, vocab_size: int = 4096,
                                       num_threads: int = None, max_sentence_length: int = 2048,
@@ -602,7 +662,7 @@ def main():
     # Input/Output - same as train.py
     io_group = parser.add_argument_group("Input/Output")
     io_group.add_argument("--input_files", nargs="+", required=True,
-                          help="Input genomic sequence files (FASTA format)")
+                          help="Input genomic sequence files (FASTA or plain text format)")
     io_group.add_argument("--output_dir", required=True,
                           help="Output directory for tokenizer")
 
@@ -681,7 +741,7 @@ def main():
     total_start_time = time.time()
 
     try:
-        # Step 1: Prepare data
+        # Step 1: Prepare data - using the improved function that handles both FASTA and text formats
         logger.info("Preparing genomic data...")
         prepared_data = cpu_optimized_prepare_data(
             args.input_files,
@@ -720,7 +780,9 @@ def main():
             sentencepiece_model_file=model_file,
             unk_token="<unk>",
             pad_token="<pad>",
-            mask_token="<mask>"
+            mask_token="<mask>",
+            cls_token="<cls>",
+            sep_token="<sep>"
         )
 
         # UPDATED: Use ensure_special_tokens instead of _ensure_special_tokens
@@ -736,6 +798,7 @@ def main():
         if not args.skip_verification:
             verify_tokenizer(tokenizer)
 
+        # Step 6: Convert to HuggingFace format (optional)
         if not args.skip_hf_conversion:
             # Determine the output directory for HF tokenizer
             hf_tokenizer_dir = args.hf_tokenizer_dir or os.path.join(args.output_dir, "hf_tokenizer")
@@ -752,7 +815,13 @@ def main():
                         "mask_token": "<mask>",
                         "cls_token": "<cls>",
                         "sep_token": "<sep>"
-                    }
+                    },
+                    test_sequences=[
+                        "ATGCATGCATGC",
+                        "GGGAAATTTCCC",
+                        "ATATATATATAT",
+                        "GCGCGCGCGCGC"
+                    ] if not args.skip_verification else None
                 )
                 logger.info(f"Successfully created HuggingFace tokenizer in {hf_tokenizer_dir}")
 
@@ -808,7 +877,6 @@ def main():
         return 1
 
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
