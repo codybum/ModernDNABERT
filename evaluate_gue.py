@@ -17,7 +17,7 @@ from typing import Optional
 from torch.utils.data import Dataset
 from transformers import (
     Trainer, TrainingArguments, PretrainedConfig,
-    set_seed
+    set_seed, BertConfig
 )
 
 # Updated import for the new tokenizer approach
@@ -229,38 +229,41 @@ def load_model_for_classification(model_path, tokenizer, num_labels):
         logger.warning("SafeTensors not installed. Using PyTorch loading instead.")
         has_safetensors = False
 
-    # Step 1: Load the original config
+    # Step 1: Print error trace for debugging
+    def print_tensor_shapes(state_dict, prefix=""):
+        """Helper to print key tensor shapes for debugging"""
+        logger.info(f"{prefix} TENSOR SHAPES:")
+        for key in ['bert.embeddings.word_embeddings.weight',
+                    'bert.encoder.layer.0.attention.self.query.weight']:
+            if key in state_dict:
+                logger.info(f"  {key}: {state_dict[key].shape}")
+
+    # Step 2: Load the original config with full debug info
     config_path = os.path.join(model_path, "config.json")
     if os.path.exists(config_path):
         logger.info(f"Loading configuration from {config_path}")
-        config = PretrainedConfig.from_json_file(config_path)
+        with open(config_path, 'r') as f:
+            config_json = json.load(f)
+            logger.info(f"Raw config: {json.dumps(config_json, indent=2)[:200]}...")
 
-        # Store the original position embeddings size
-        original_max_position = getattr(config, 'max_position_embeddings', 512)
-        logger.info(f"Original max_position_embeddings: {original_max_position}")
+        config = BertConfig.from_dict(config_json)
 
-        # Log key model dimensions
-        logger.info(f"Model dimensions from config: hidden_size={config.hidden_size}, "
-                    f"num_attention_heads={config.num_attention_heads}, "
-                    f"num_hidden_layers={config.num_hidden_layers}")
+        # Log important dimensions
+        hidden_size = config.hidden_size
+        num_attention_heads = config.num_attention_heads
+        num_hidden_layers = config.num_hidden_layers
+        logger.info(f"CONFIG DIMENSIONS: hidden_size={hidden_size}, "
+                    f"num_attention_heads={num_attention_heads}, "
+                    f"num_hidden_layers={num_hidden_layers}")
     else:
-        # If no config, create one with default position embeddings size
-        logger.info(f"No config.json found, creating default config")
-        config = create_genomic_bert_config(
-            vocab_size=tokenizer.vocab_size,
-            max_position_embeddings=512,
-            use_alibi=True,
-            attention_type="alibi"
-        )
-        original_max_position = 512
+        raise ValueError(f"Config file not found at {config_path}. Cannot proceed without original dimensions.")
 
-    # Step 2: Check if the model uses ALiBi attention
+    # Step 3: Check if the model uses ALiBi attention
     uses_alibi = getattr(config, 'use_alibi', False) or getattr(config, 'attention_type', '') == 'alibi'
     if uses_alibi:
         logger.info("Model uses ALiBi attention")
-        # For ALiBi models, we'll keep the position embeddings but they won't be used
 
-    # Step 3: Load state dict first to inspect/modify it before creating model
+    # Step 4: Load state dict first to inspect dimensions
     state_dict = None
     safetensors_path = os.path.join(model_path, "model.safetensors")
     pytorch_path = os.path.join(model_path, "pytorch_model.bin")
@@ -280,50 +283,144 @@ def load_model_for_classification(model_path, tokenizer, num_labels):
     else:
         raise FileNotFoundError(f"No model weights found at {model_path}")
 
-    # Step 4: Create model with the original config directly
-    # This ensures we preserve all dimensions from the original model
-    logger.info("Creating base BERT model with original config dimensions")
-    bert_model = create_genomic_bert_model(config)
+    # Print model tensor shapes for debugging
+    print_tensor_shapes(state_dict, "LOADED MODEL")
 
-    # Step 5: Handle the position embeddings in state_dict for ALiBi models
-    if 'bert.embeddings.position_embeddings.weight' in state_dict:
+    # Step 5: BYPASS create_genomic_bert_model completely and create BertForMaskedLM directly
+    from transformers import BertForMaskedLM
+    from modeling.alibi_attention import GenomicBertForMaskedLM
+
+    logger.info(f"Creating model with original config dimensions: hidden_size={config.hidden_size}")
+    bert_model = GenomicBertForMaskedLM(config)
+
+    # Verify the model dimensions match config
+    model_hidden_size = bert_model.config.hidden_size
+    logger.info(f"Created model with hidden_size={model_hidden_size}")
+
+    if model_hidden_size != config.hidden_size:
+        logger.error(f"DIMENSION MISMATCH: Config has hidden_size={config.hidden_size} "
+                     f"but created model has hidden_size={model_hidden_size}")
+        raise ValueError("Model dimensions don't match config! Cannot continue.")
+
+    # Step 6: Handle position embeddings for ALiBi
+    if 'bert.embeddings.position_embeddings.weight' in state_dict and uses_alibi:
         pos_embed_weight = state_dict['bert.embeddings.position_embeddings.weight']
-        pretrained_size = pos_embed_weight.shape[0]
+        pos_embed_size = pos_embed_weight.shape[0]
+        logger.info(f"Found position embeddings with size {pos_embed_size}")
 
-        if pretrained_size != original_max_position and uses_alibi:
-            logger.info(f"ALiBi model: Handling position embeddings tensor of size {pretrained_size}")
-            # Option 1: Remove position embeddings from state dict for ALiBi models
-            del state_dict['bert.embeddings.position_embeddings.weight']
-            logger.info("Removed position embeddings from state dict for ALiBi model")
+        # For ALiBi models, remove position embeddings as they won't be used
+        del state_dict['bert.embeddings.position_embeddings.weight']
+        logger.info("Removed position embeddings from state dict for ALiBi model")
 
-    # Step 6: Load weights into model
+    # Step 7: Apply ALiBi if needed - AFTER removing position embeddings
+    if uses_alibi:
+        from modeling.alibi_attention import modify_bert_for_alibi
+        logger.info("Applying ALiBi to model")
+        bert_model = modify_bert_for_alibi(bert_model)
+
+    # Step 8: Load weights with clear error message
     logger.info("Loading weights into model")
-    # Use strict=False to allow missing position embeddings in ALiBi models
-    missing_keys, unexpected_keys = bert_model.load_state_dict(state_dict, strict=False)
+    try:
+        missing_keys, unexpected_keys = bert_model.load_state_dict(state_dict, strict=False)
 
-    # Log missing and unexpected keys
-    if missing_keys:
-        logger.info(f"Missing keys: {missing_keys}")
-    if unexpected_keys:
-        logger.info(f"Unexpected keys: {unexpected_keys}")
+        if missing_keys:
+            logger.info(f"Missing keys: {missing_keys}")
+        if unexpected_keys:
+            logger.info(f"Unexpected keys: {unexpected_keys}")
+    except RuntimeError as e:
+        logger.error(f"FATAL ERROR loading state dict: {e}")
+        # Check for dimension mismatch in error message
+        if "size mismatch" in str(e):
+            logger.error("DIMENSION MISMATCH detected. Comparing model vs. checkpoint:")
+            # Check critical tensors
+            for param_name, param in bert_model.named_parameters():
+                if param_name.replace(".", ".") in state_dict:
+                    checkpoint_shape = state_dict[param_name.replace(".", ".")].shape
+                    model_shape = param.shape
+                    if checkpoint_shape != model_shape:
+                        logger.error(f"  {param_name}: Model={model_shape}, Checkpoint={checkpoint_shape}")
+        raise
 
-    # Step 7: Create sequence classification model
+    # Step 9: Create sequence classification model
     logger.info(f"Creating sequence classification model with {num_labels} labels")
+
+    # Create sequence classification model with proper layer sizes
+    class ModernDNABERTForSequenceClassification(torch.nn.Module):
+        def __init__(self, bert_model, num_labels):
+            super().__init__()
+            self.bert = bert_model
+            self.num_labels = num_labels
+
+            # Get the correct hidden_size from the actual model
+            self.hidden_size = bert_model.config.hidden_size
+            logger.info(f"Classification head using hidden_size={self.hidden_size}")
+
+            # Add classification head
+            self.dropout = torch.nn.Dropout(bert_model.config.hidden_dropout_prob)
+            self.classifier = torch.nn.Linear(self.hidden_size, num_labels)
+
+            # Initialize weights
+            self.classifier.weight.data.normal_(mean=0.0, std=0.02)
+            if self.classifier.bias is not None:
+                self.classifier.bias.data.zero_()
+
+        def forward(self, input_ids=None, attention_mask=None, token_type_ids=None,
+                    labels=None, return_dict=None, **kwargs):
+            """Forward pass for classification"""
+            # Forward pass through BERT (getting hidden states)
+            bert_outputs = self.bert(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                return_dict=True,
+                output_hidden_states=True,
+            )
+
+            # Get the hidden states in a safe way
+            if hasattr(bert_outputs, 'hidden_states') and bert_outputs.hidden_states is not None:
+                sequence_output = bert_outputs.hidden_states[-1]
+            elif hasattr(bert_outputs, 'last_hidden_state'):
+                sequence_output = bert_outputs.last_hidden_state
+            else:
+                try:
+                    internal_bert_outputs = self.bert.bert(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        token_type_ids=token_type_ids,
+                        return_dict=True,
+                    )
+                    sequence_output = internal_bert_outputs.last_hidden_state
+                except AttributeError:
+                    raise ValueError(
+                        "Cannot extract sequence output from model. Make sure it provides either hidden_states or last_hidden_state.")
+
+            # Use the [CLS] token for classification
+            pooled_output = sequence_output[:, 0]
+            pooled_output = self.dropout(pooled_output)
+            logits = self.classifier(pooled_output)
+
+            # Calculate loss if labels provided
+            loss = None
+            if labels is not None:
+                loss_fct = torch.nn.CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+
+            # Return in format expected by HF Trainer
+            from transformers.modeling_outputs import SequenceClassifierOutput
+            return SequenceClassifierOutput(
+                loss=loss,
+                logits=logits,
+                hidden_states=bert_outputs.hidden_states if hasattr(bert_outputs, 'hidden_states') else None,
+                attentions=bert_outputs.attentions if hasattr(bert_outputs, 'attentions') else None,
+            )
+
     model = ModernDNABERTForSequenceClassification(bert_model, num_labels)
 
-    # Step 8: Add DDP-specific settings to model - with SAFER ATTRIBUTE ACCESS
-    if uses_alibi:
-        # Carefully check each level of the attribute hierarchy
-        if hasattr(model, 'bert'):
-            bert_module = model.bert
-            # Next check if bert has embeddings
-            if hasattr(bert_module, 'embeddings'):
-                embeddings_module = bert_module.embeddings
-                # Finally check for position_embeddings
-                if hasattr(embeddings_module, 'position_embeddings'):
-                    # Freeze position embeddings to prevent DDP sync issues
-                    embeddings_module.position_embeddings.requires_grad = False
-                    logger.info("Froze position embeddings for distributed training compatibility")
+    # Step 10: Handle DDP-specific settings
+    if uses_alibi and hasattr(model, 'bert') and hasattr(model.bert, 'embeddings') and hasattr(model.bert.embeddings,
+                                                                                               'position_embeddings'):
+        model.bert.embeddings.position_embeddings.requires_grad = False
+        logger.info("Froze position embeddings for distributed training compatibility")
 
     return model
 
