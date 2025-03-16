@@ -308,6 +308,8 @@ def process_file_chunk(chunk_data):
     sequences = []
     current_seq = ""
     is_fasta = None  # Will be detected
+    lines_read = 0
+    lines_with_content = 0
 
     try:
         with open(file_path, 'r') as f:
@@ -332,6 +334,12 @@ def process_file_chunk(chunk_data):
                 # Check if any line starts with '>' - indicating FASTA format
                 is_fasta = any(line.startswith('>') for line in peek_lines if line)
 
+                # Log the format detection
+                if peek_lines:
+                    logger.debug(f"Peeked lines: {peek_lines[:3]}, detected as FASTA: {is_fasta}")
+                else:
+                    logger.warning(f"No content found in the beginning of file {file_path}")
+
                 # Reset to where we were before peeking
                 f.seek(current_pos)
 
@@ -340,6 +348,7 @@ def process_file_chunk(chunk_data):
             while f.tell() < end_pos and f.tell() < file_size:
                 line = f.readline()
                 bytes_read += len(line)
+                lines_read += 1
 
                 if not line:
                     break
@@ -350,9 +359,12 @@ def process_file_chunk(chunk_data):
                 if not line:
                     continue
 
+                lines_with_content += 1
+
                 # For the first chunk, detect format if not already detected
                 if is_fasta is None:
                     is_fasta = line.startswith('>')
+                    logger.debug(f"Format detected from line: '{line[:20]}...', is_fasta: {is_fasta}")
 
                 # Process according to format
                 if is_fasta:
@@ -363,25 +375,43 @@ def process_file_chunk(chunk_data):
                             current_seq = ""
                         continue
                     # Only accept A, T, G, C sequences for FASTA content
-                    if set(line.upper()) <= set('ATGC'):
-                        current_seq += line.upper()
+                    # More permissive filtering - allow N's and other ambiguous nucleotides
+                    filtered_line = ''.join(c for c in line.upper() if c in 'ATGCNRYKMSWBDHV')
+                    if filtered_line:
+                        # Convert any non-ATGC to N for standardization
+                        standardized_line = ''.join(c if c in 'ATGC' else 'N' for c in filtered_line)
+                        current_seq += standardized_line
                 else:
                     # Plain text format - one sequence per line
-                    # Filter to only keep A, T, G, C characters
-                    filtered_seq = ''.join(c for c in line.upper() if c in 'ATGC')
+                    # More permissive filtering - allow N's and other ambiguous nucleotides
+                    filtered_seq = ''.join(c for c in line.upper() if c in 'ATGCNRYKMSWBDHV')
                     if filtered_seq:
-                        sequences.append(filtered_seq)
+                        # Convert any non-ATGC to N for standardization
+                        standardized_seq = ''.join(c if c in 'ATGC' else 'N' for c in filtered_seq)
+                        sequences.append(standardized_seq)
 
             # For FASTA format, add the last sequence if it exists
             if is_fasta and current_seq:
                 sequences.append(current_seq)
+
+        # Log information about what was processed
+        logger.debug(f"Chunk {chunk_id} processing: Read {lines_read} lines, {lines_with_content} with content")
+        logger.debug(
+            f"Extracted {len(sequences)} sequences, avg length: {sum(len(s) for s in sequences) / max(1, len(sequences)):.1f}")
+
+        if not sequences:
+            logger.warning(f"No sequences extracted from chunk {chunk_id} of file {file_path}")
+            if lines_with_content > 0:
+                logger.warning(f"Found {lines_with_content} non-empty lines but no valid sequences")
 
         return {
             'sequences': sequences,
             'chunk_id': chunk_id,
             'bytes_processed': bytes_read,
             'num_sequences': len(sequences),
-            'is_fasta': is_fasta
+            'is_fasta': is_fasta,
+            'lines_read': lines_read,
+            'lines_with_content': lines_with_content
         }
     except Exception as e:
         logger.error(f"Error processing chunk {chunk_id} of file {file_path}: {e}")
@@ -390,7 +420,9 @@ def process_file_chunk(chunk_data):
             'chunk_id': chunk_id,
             'bytes_processed': 0,
             'num_sequences': 0,
-            'is_fasta': None
+            'is_fasta': None,
+            'lines_read': lines_read,
+            'lines_with_content': lines_with_content
         }
 
 def update_progress(result):
