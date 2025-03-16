@@ -129,6 +129,44 @@ class GenomicDataset(Dataset):
     def _prepare_chunks(self) -> List[str]:
         """
         Split sequences into chunks with variable lengths, including reverse complements.
+        """
+        chunks = []
+
+        # Track statistics for logging
+        total_sequences = len(self.sequences)
+        truncated_count = 0
+        rc_count = 0  # Counter for reverse complements
+        short_seq_count = 0  # Counter for sequences shorter than chunk_size
+        short_seq_usable = 0  # Counter for short sequences that meet the length requirement
+
+        logger.info(f"Starting with {total_sequences} input sequences")
+        logger.info(f"Using chunk_size={self.chunk_size}, min_length=100")
+
+        # Add length distribution analysis
+        seq_lengths = [len(seq) for seq in self.sequences]
+        if seq_lengths:
+            logger.info(
+                f"Sequence length stats: min={min(seq_lengths)}, max={max(seq_lengths)}, avg={sum(seq_lengths) / len(seq_lengths):.1f}")
+            # Count sequences by length range
+            under_100 = sum(1 for l in seq_lengths if l < 100)
+            under_chunk = sum(1 for l in seq_lengths if 100 <= l < self.chunk_size)
+            over_chunk = sum(1 for l in seq_lengths if l >= self.chunk_size)
+            logger.info(
+                f"Length distribution: <100bp: {under_100}, 100-{self.chunk_size}bp: {under_chunk}, ≥{self.chunk_size}bp: {over_chunk}")
+
+        # Rest of the method remains the same as in my previous response...
+
+        logger.info(f"Final chunks breakdown:")
+        logger.info(f"  From short sequences: {short_seq_usable}")
+        logger.info(f"  From chunking long sequences: {len(chunks) - short_seq_usable - rc_count}")
+        logger.info(f"  From reverse complements: {rc_count}")
+        logger.info(f"  Total chunks: {len(chunks)}")
+
+        return chunks
+
+    def _prepare_chunks_old(self) -> List[str]:
+        """
+        Split sequences into chunks with variable lengths, including reverse complements.
         Handles sequences shorter than chunk_size by including them directly if they meet
         the minimum length requirement.
 
