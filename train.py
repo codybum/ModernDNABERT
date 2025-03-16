@@ -3,8 +3,9 @@
 Main training script for genomic BERT with selectable attention mechanisms.
 
 This script uses PyTorch Accelerate to train a BERT model on genomic sequences
-with support for different attention mechanisms including standard BERT attention
-and ALiBi attention for improved long-sequence handling.
+with support for different attention mechanisms including standard BERT attention,
+ALiBi attention for improved long-sequence handling, and SDPA for efficient training
+on modern GPUs.
 """
 
 import os
@@ -68,9 +69,15 @@ def main():
                              help="Number of attention heads (default: 12)")
     model_group.add_argument("--dropout", type=float, default=0.1,
                              help="Dropout probability (default: 0.1)")
-    # Add attention type selection
-    model_group.add_argument("--attention_type", type=str, default="alibi", choices=["standard", "alibi"],
-                             help="Type of attention mechanism to use (default: alibi)")
+    # Updated attention type selection to include SDPA
+    model_group.add_argument("--attention_type", type=str, default="sdpa",
+                             choices=["standard", "alibi", "sdpa"],
+                             help="Type of attention mechanism to use (default: sdpa)")
+    # Add option to control ALiBi specifically when using SDPA
+    model_group.add_argument("--use_alibi_with_sdpa", action="store_true",
+                             help="Use ALiBi positional bias with SDPA attention (default: True)")
+    model_group.add_argument("--disable_alibi_with_sdpa", action="store_true",
+                             help="Disable ALiBi positional bias when using SDPA attention")
 
     # Sequence length options
     seq_group = parser.add_argument_group("Sequence Options")
@@ -140,6 +147,21 @@ def main():
 
     args = parser.parse_args()
 
+    # Process SDPA and ALiBi interaction
+    if args.attention_type == "sdpa":
+        # Determine ALiBi usage with SDPA
+        if args.disable_alibi_with_sdpa:
+            args.use_alibi = False
+        else:
+            # Default to using ALiBi with SDPA unless explicitly disabled
+            args.use_alibi = True
+    elif args.attention_type == "alibi":
+        # Always use ALiBi with "alibi" attention type
+        args.use_alibi = True
+    else:
+        # Don't use ALiBi with standard attention
+        args.use_alibi = False
+
     # Configure Accelerate first
     accelerator = setup_accelerator(args)
 
@@ -173,6 +195,11 @@ def main():
         logger.info(f"Found {torch.cuda.device_count()} CUDA devices")
         for i in range(torch.cuda.device_count()):
             logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+            # Log CUDA capabilities for SDPA optimization information
+            cap = torch.cuda.get_device_capability(i)
+            logger.info(f"  CUDA Capability: {cap[0]}.{cap[1]}")
+            if cap[0] >= 8:
+                logger.info(f"  GPU {i} supports hardware-accelerated SDPA (Ampere architecture or newer)")
     else:
         logger.warning("No CUDA devices found! Training will run on CPU.")
 
