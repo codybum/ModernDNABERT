@@ -666,7 +666,7 @@ def train_with_accelerate(args, accelerator):
     )
 
     # Apply sequence length overrides for testing if specified
-    if args.gth is not None:
+    if hasattr(args, 'gth') and args.gth is not None:
         logger.info(f"TEST MODE: Enforcing sequence length of {args.test_sequence_length}")
         args.pre_training_length = args.test_sequence_length
         args.max_supported_model_length = args.test_sequence_length
