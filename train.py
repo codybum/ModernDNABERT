@@ -70,9 +70,9 @@ def main():
     model_group.add_argument("--dropout", type=float, default=0.1,
                              help="Dropout probability (default: 0.1)")
     # Updated attention type selection to include SDPA
-    model_group.add_argument("--attention_type", type=str, default="sdpa",
+    model_group.add_argument("--attention_type", type=str, default="alibi",
                              choices=["standard", "alibi", "sdpa"],
-                             help="Type of attention mechanism to use (default: sdpa)")
+                             help="Type of attention mechanism to use (default: alibi, which also uses sdpa) ")
     # Add option to control ALiBi specifically when using SDPA
     model_group.add_argument("--use_alibi_with_sdpa", action="store_true",
                              help="Use ALiBi positional bias with SDPA attention (default: True)")
