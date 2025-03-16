@@ -1,121 +1,121 @@
 #!/bin/bash
 
-# Script to run GUE evaluation on genomic BERT models aligned with DNABERT-2 parameters
-# Usage: ./run_gue_evaluation.sh /path/to/model /path/to/tokenizer /path/to/gue_data [OUTPUT_DIR] [NUM_GPUS]
-# Example: ./run_gue_evaluation.sh ./genomic_bert_model/final ./genomic_bert_model/tokenizer ./GUE ./results 4
+# Optimized script to run GUE evaluation on a genomic BERT model with ALiBi attention
+# UPDATED: Tokenizer is now part of the model
+# Usage: ./run_gue_evaluation.sh /path/to/model /path/to/gue_data [OUTPUT_DIR] [NUM_GPUS]
+# Example: ./run_gue_evaluation.sh ./genomic_bert_model/final ./GUE ./results 4
 
 # Set default values
 MODEL_PATH=$1
-TOKENIZER_PATH=$2
-GUE_PATH=$3
+GUE_PATH=$2
 OUTPUT_DIR="./gue_results"
 USE_ALIBI=true
 NUM_GPUS=8  # Using 8 GPUs as reported
 
 # Check if required arguments are provided
-if [ -z "$MODEL_PATH" ] || [ -z "$TOKENIZER_PATH" ] || [ -z "$GUE_PATH" ]; then
-    echo "Usage: $0 MODEL_PATH TOKENIZER_PATH GUE_PATH [OUTPUT_DIR] [NUM_GPUS]"
-    echo "Example: $0 ./genomic_bert_model/final ./genomic_bert_model/tokenizer ./GUE ./results 4"
+if [ -z "$MODEL_PATH" ] || [ -z "$GUE_PATH" ]; then
+    echo "Usage: $0 MODEL_PATH GUE_PATH [OUTPUT_DIR] [NUM_GPUS]"
+    echo "Example: $0 ./genomic_bert_model/final ./GUE ./results 4"
+    echo "Note: Tokenizer is now expected to be part of the model directory"
     exit 1
 fi
 
-# Use 4th argument as output dir if provided
-if [ ! -z "$4" ]; then
-    OUTPUT_DIR=$4
+# Use 3rd argument as output dir if provided
+if [ ! -z "$3" ]; then
+    OUTPUT_DIR=$3
 fi
 
-# Use 5th argument as number of GPUs if provided
-if [ ! -z "$5" ]; then
-    NUM_GPUS=$5
+# Use 4th argument as number of GPUs if provided
+if [ ! -z "$4" ]; then
+    NUM_GPUS=$4
 fi
 
 # Create output directory
 mkdir -p $OUTPUT_DIR
 
-# Function to run evaluation on a task with parameters matching DNABERT-2
+# Function to run evaluation on a task with optimized parameters
 run_task() {
     TASK_NAME=$1
     MAX_LENGTH=$2
     BATCH_SIZE=$3
     LEARNING_RATE=$4
     EPOCHS=$5
-    MAX_STEPS=$6  # Optional parameter
 
     echo "==================================================================="
     echo "Evaluating on $TASK_NAME with max_length=$MAX_LENGTH, batch_size=$BATCH_SIZE"
     echo "==================================================================="
 
-    # Calculate per device batch size based on NUM_GPUS
-    PER_DEVICE_BATCH_SIZE=$((BATCH_SIZE / NUM_GPUS))
-    # Ensure minimum batch size of 4
-    if [ $PER_DEVICE_BATCH_SIZE -lt 4 ]; then
-        PER_DEVICE_BATCH_SIZE=4
-    fi
-
-    # Construct command with optional max_steps
-    CMD="python evaluate_gue.py \
-        --model_path $MODEL_PATH \
-        --tokenizer_path $TOKENIZER_PATH \
-        --gue_path $GUE_PATH \
-        --output_dir $OUTPUT_DIR \
-        --tasks $TASK_NAME \
-        --max_length $MAX_LENGTH \
-        --batch_size $PER_DEVICE_BATCH_SIZE \
-        --learning_rate $LEARNING_RATE \
-        --epochs $EPOCHS \
-        --use_alibi"
-
-    # Add max_steps if provided
-    if [ ! -z "$MAX_STEPS" ]; then
-        CMD="$CMD --max_steps $MAX_STEPS"
-    fi
-
     # If multiple GPUs are available, use DistributedDataParallel
     if [ $NUM_GPUS -gt 1 ]; then
-        CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 $CMD
+        CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python evaluate_gue.py \
+            --model_path $MODEL_PATH \
+            --tokenizer_path $MODEL_PATH \
+            --gue_path $GUE_PATH \
+            --output_dir $OUTPUT_DIR \
+            --tasks $TASK_NAME \
+            --max_length $MAX_LENGTH \
+            --batch_size $BATCH_SIZE \
+            --learning_rate $LEARNING_RATE \
+            --epochs $EPOCHS \
+            --use_alibi
     else
-        $CMD
+        python evaluate_gue.py \
+            --model_path $MODEL_PATH \
+            --tokenizer_path $MODEL_PATH \
+            --gue_path $GUE_PATH \
+            --output_dir $OUTPUT_DIR \
+            --tasks $TASK_NAME \
+            --max_length $MAX_LENGTH \
+            --batch_size $BATCH_SIZE \
+            --learning_rate $LEARNING_RATE \
+            --epochs $EPOCHS \
+            --use_alibi
     fi
 }
 
-echo "Starting GUE evaluation with parameters matching DNABERT-2..."
+echo "Starting optimized GUE evaluation for ALiBi model with 8 GPUs (each with 144GB VRAM)..."
 echo "Model path: $MODEL_PATH"
-echo "Tokenizer path: $TOKENIZER_PATH"
+echo "Using same path for model and tokenizer since tokenizer is now part of the model"
 echo "GUE data path: $GUE_PATH"
 echo "Output directory: $OUTPUT_DIR"
 echo "Number of GPUs: $NUM_GPUS"
 echo "Using ALiBi attention: $USE_ALIBI"
+echo "Model was trained with pre_training_length=6144, max_inference_length=24576"
+echo "Current configuration uses massive batch sizes and sequence lengths to utilize GPU resources"
 
-# EMP tasks - Using original DNABERT-2 length (128) with increased batch size
+# Calculate batch size based on having 8 GPUs with 144GB VRAM each
+# With such massive GPU memory and low utilization reported, we need to dramatically increase batch sizes
+BASE_BATCH_SIZE=32  # Per GPU for medium-length sequences
+
+# EMP tasks - using original DNABERT-2 length of 128
 for task in H3 H3K14ac H3K36me3 H3K4me1 H3K4me2 H3K4me3 H3K79me3 H3K9ac H4 H4ac; do
-    run_task "emp_$task" 128 64 3e-5 3
+    run_task "emp_$task" 128 $BASE_BATCH_SIZE 3e-5 3
 done
 
-# Promoter core tasks - Using original DNABERT-2 length (20) with increased batch size
-run_task "prom_core_all" 20 64 3e-5 4
-run_task "prom_core_notata" 20 64 3e-5 4
-run_task "prom_core_tata" 20 64 3e-5 10  # More epochs for tata tasks
+# Promoter core tasks - using original DNABERT-2 length of 20
+run_task "prom_core_all" 20 $BASE_BATCH_SIZE 3e-5 4
+run_task "prom_core_notata" 20 $BASE_BATCH_SIZE 3e-5 4
+run_task "prom_core_tata" 20 $BASE_BATCH_SIZE 3e-5 10  # More epochs for tata tasks
 
-# Promoter 300 tasks - Using original DNABERT-2 length (70) with increased batch size
-run_task "prom_300_all" 70 64 3e-5 4
-run_task "prom_300_notata" 70 64 3e-5 4
-run_task "prom_300_tata" 70 64 3e-5 10  # More epochs for tata tasks
+# Promoter 300 tasks - using original DNABERT-2 length of 70
+run_task "prom_300_all" 70 $BASE_BATCH_SIZE 3e-5 4
+run_task "prom_300_notata" 70 $BASE_BATCH_SIZE 3e-5 4
+run_task "prom_300_tata" 70 $BASE_BATCH_SIZE 3e-5 10  # More epochs for tata tasks
 
-# Splice site task - Using original DNABERT-2 length (80) with increased batch size
-run_task "splice_reconstructed" 80 64 3e-5 5
+# Splice site task - using original DNABERT-2 length of 80
+run_task "splice_reconstructed" 80 $BASE_BATCH_SIZE 3e-5 5
 
-# Virus task - Using original DNABERT-2 length (256) with increased batch size
-run_task "virus_covid" 256 128 3e-5 8
+# Virus task - using original DNABERT-2 length of 256
+run_task "virus_covid" 256 $BASE_BATCH_SIZE 3e-5 8
 
-# Mouse tasks - Using original DNABERT-2 length (30) with increased batch size
-# Note: DNABERT-2 uses max_steps=1000 for mouse tasks
+# Mouse tasks - using original DNABERT-2 length of 30
 for i in {0..4}; do
-    run_task "mouse_$i" 30 128 3e-5 5 1000
+    run_task "mouse_$i" 30 $BASE_BATCH_SIZE 3e-5 5
 done
 
-# Transcription factor tasks - Using original DNABERT-2 length (30) with increased batch size
+# Transcription factor tasks - using original DNABERT-2 length of 30
 for i in {0..4}; do
-    run_task "tf_$i" 30 128 3e-5 3
+    run_task "tf_$i" 30 $BASE_BATCH_SIZE 3e-5 3
 done
 
 echo "GUE evaluation completed. Results saved to $OUTPUT_DIR"
