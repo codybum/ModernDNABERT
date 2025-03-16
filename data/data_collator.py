@@ -129,6 +129,8 @@ class GenomicDataset(Dataset):
     def _prepare_chunks(self) -> List[str]:
         """
         Split sequences into chunks with variable lengths, including reverse complements.
+        Handles sequences shorter than chunk_size by including them directly if they meet
+        the minimum length requirement.
 
         Returns:
             List of chunks
@@ -139,6 +141,7 @@ class GenomicDataset(Dataset):
         total_sequences = len(self.sequences)
         truncated_count = 0
         rc_count = 0  # Counter for reverse complements
+        short_seq_count = 0  # Counter for sequences shorter than chunk_size
 
         for sequence in self.sequences:
             # Truncate very long sequences for safety
@@ -146,38 +149,54 @@ class GenomicDataset(Dataset):
                 truncated_count += 1
                 sequence = sequence[:self.max_safe_sequence_length]
 
-            # Standard chunks for primary training
-            for i in range(0, len(sequence) - self.chunk_size + 1, self.stride):
-                chunk = sequence[i:i + self.chunk_size]
-                if len(chunk) >= 100:  # Only keep reasonably sized chunks
-                    chunks.append(chunk)
+            # Handle sequences shorter than chunk_size
+            if len(sequence) < self.chunk_size:
+                if len(sequence) >= 100:  # Keep the same minimum size check
+                    chunks.append(sequence)
+                    short_seq_count += 1
 
                     # Add reverse complement if enabled
                     if self.use_reverse_complement:
-                        rc_chunk = reverse_complement(chunk)
-                        chunks.append(rc_chunk)
+                        rc_seq = reverse_complement(sequence)
+                        chunks.append(rc_seq)
                         rc_count += 1
+            else:
+                # Standard chunks for primary training - no change for longer sequences
+                for i in range(0, len(sequence) - self.chunk_size + 1, self.stride):
+                    chunk = sequence[i:i + self.chunk_size]
+                    if len(chunk) >= 100:  # Only keep reasonably sized chunks
+                        chunks.append(chunk)
 
-            # Optionally add longer chunks for extrapolation training
-            if self.sample_long_sequences and len(sequence) > self.chunk_size * 2:
-                # Add a few longer chunks - up to 2-4x the normal chunk size
-                for _ in range(min(2, len(sequence) // (self.chunk_size * 2))):  # Add just a few longer samples
-                    long_size = random.randint(int(self.chunk_size * 1.5),
-                                               min(len(sequence), int(self.chunk_size * 4)))
-                    if len(sequence) > long_size:
-                        start = random.randint(0, len(sequence) - long_size)
-                        long_chunk = sequence[start:start + long_size]
-                        chunks.append(long_chunk)
-
-                        # Add reverse complement for long chunks too
+                        # Add reverse complement if enabled
                         if self.use_reverse_complement:
-                            rc_long_chunk = reverse_complement(long_chunk)
-                            chunks.append(rc_long_chunk)
+                            rc_chunk = reverse_complement(chunk)
+                            chunks.append(rc_chunk)
                             rc_count += 1
 
+                # Optionally add longer chunks for extrapolation training
+                if self.sample_long_sequences and len(sequence) > self.chunk_size * 2:
+                    # Add a few longer chunks - up to 2-4x the normal chunk size
+                    for _ in range(min(2, len(sequence) // (self.chunk_size * 2))):  # Add just a few longer samples
+                        long_size = random.randint(int(self.chunk_size * 1.5),
+                                                   min(len(sequence), int(self.chunk_size * 4)))
+                        if len(sequence) > long_size:
+                            start = random.randint(0, len(sequence) - long_size)
+                            long_chunk = sequence[start:start + long_size]
+                            chunks.append(long_chunk)
+
+                            # Add reverse complement for long chunks too
+                            if self.use_reverse_complement:
+                                rc_long_chunk = reverse_complement(long_chunk)
+                                chunks.append(rc_long_chunk)
+                                rc_count += 1
+
+        # Log statistics
         if truncated_count > 0:
             logger.warning(
                 f"Truncated {truncated_count} out of {total_sequences} sequences that exceeded maximum safe length of {self.max_safe_sequence_length}")
+
+        if short_seq_count > 0:
+            logger.info(f"Included {short_seq_count} sequences shorter than chunk_size but meeting minimum length")
 
         if self.use_reverse_complement and rc_count > 0:
             logger.info(f"Added {rc_count} reverse complement sequences for augmentation")
