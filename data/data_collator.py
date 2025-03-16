@@ -4,7 +4,7 @@ Genomic dataset and data collator implementations.
 This module provides dataset classes for genomic sequences and data collators
 for masked language modeling with proper handling of long sequences.
 """
-import os
+
 import random
 import logging
 import torch
@@ -33,8 +33,7 @@ def reverse_complement(sequence):
 
     return ''.join(complement_map.get(base, base) for base in reversed(sequence))
 
-
-class GenomicDataset(torch.utils.data.IterableDataset):
+class GenomicDataset(Dataset):
     """
     Dataset for genomic sequences with variable length handling.
 
@@ -53,7 +52,7 @@ class GenomicDataset(torch.utils.data.IterableDataset):
             stride: int = 1000,
             sample_long_sequences: bool = True,
             max_safe_sequence_length: int = 50000,
-            use_reverse_complement: bool = True,
+            use_reverse_complement: bool = True,  # New parameter
     ):
         """
         Initialize the dataset.
@@ -70,7 +69,6 @@ class GenomicDataset(torch.utils.data.IterableDataset):
             max_safe_sequence_length: Maximum safe sequence length for processing
             use_reverse_complement: Whether to include reverse complements for augmentation
         """
-        self.file_paths = sorted(file_paths)  # Sort for reproducibility
         self.tokenizer = tokenizer
         self.pre_training_length = pre_training_length
         self.max_inference_length = max_inference_length
@@ -79,139 +77,219 @@ class GenomicDataset(torch.utils.data.IterableDataset):
         self.stride = stride
         self.sample_long_sequences = sample_long_sequences
         self.max_safe_sequence_length = max_safe_sequence_length
-        self.use_reverse_complement = use_reverse_complement
-        self.epoch = 0  # For deterministic shuffling
+        self.use_reverse_complement = use_reverse_complement  # Store the new parameter
 
-        # Perform estimation to maintain API compatibility
-        self._estimate_dataset_properties()
+        # Load and prepare sequences
+        self.sequences = self._load_sequences(file_paths)
+        logger.info(f"Loaded {len(self.sequences)} sequences")
 
-    def _estimate_dataset_properties(self):
-        """Estimate dataset properties for compatibility with old API."""
-        try:
-            total_bytes = sum(os.path.getsize(f) for f in self.file_paths)
-            # Estimate sequences based on file size (rough approximation)
-            self.sequences = ["placeholder"] * (total_bytes // 1000)  # Dummy list for length checking
+        # Prepare chunks with variable lengths
+        self.chunks = self._prepare_chunks()
+        self.sequence_lengths = [len(chunk) for chunk in self.chunks]
 
-            # Estimate sequence distribution
-            est_nucleotides = total_bytes * 0.8
-            chunks_per_sequence = (self.chunk_size / self.stride) * 1.5
-            est_chunks = est_nucleotides / self.chunk_size * chunks_per_sequence
+        logger.info(f"Created {len(self.chunks)} chunks for training")
+        if self.chunks:
+            logger.info(f"Length distribution: min={min(self.sequence_lengths)}, "
+                        f"max={max(self.sequence_lengths)}, "
+                        f"avg={sum(self.sequence_lengths) / len(self.sequence_lengths):.1f}")
 
-            # Double if using reverse complement
-            if self.use_reverse_complement:
-                est_chunks *= 2
+    def _load_sequences(self, file_paths: List[str]) -> List[str]:
+        """
+        Load genomic sequences from files - supports both FASTA format and
+        plain text with one sequence per line.
 
-            # Store as chunks property for API compatibility
-            self.chunks = ["placeholder"] * int(est_chunks)
-            self.sequence_lengths = [self.chunk_size] * len(self.chunks)
+        Args:
+            file_paths: List of file paths
 
-            logger.info(f"Estimated {len(self.sequences)} sequences")
-            logger.info(f"Created {len(self.chunks)} chunks for training")
-            logger.info(
-                f"Length distribution: min={self.chunk_size}, max={self.chunk_size}, avg={float(self.chunk_size):.1f}")
-        except Exception as e:
-            logger.warning(f"Failed to estimate dataset size: {e}")
-            # Default fallbacks
-            self.sequences = ["placeholder"] * 1000000
-            self.chunks = ["placeholder"] * 10000000
-            self.sequence_lengths = [self.chunk_size] * len(self.chunks)
+        Returns:
+            List of sequences
+        """
+        sequences = []
+        total_files = 0
+        fasta_files = 0
 
-    def set_epoch(self, epoch):
-        """Set the epoch for deterministic shuffling."""
-        self.epoch = epoch
+        for file_path in file_paths:
+            logger.info(f"Loading sequences from {file_path}")
+            total_files += 1
 
-    def _process_sequence(self, sequence):
-        """Process a single sequence into encoded chunks."""
+            with open(file_path, 'r') as f:
+                # Read the first few lines to detect format
+                peek = [next(f, '').strip() for _ in range(5)]
+                f.seek(0)  # Reset to beginning
+
+                # Check if any line starts with '>' - indicating FASTA format
+                is_fasta = any(line.startswith('>') for line in peek if line)
+
+                if is_fasta:
+                    fasta_files += 1
+                    logger.info(f"Detected FASTA format for {file_path}")
+                    current_seq = ""
+                    for line in f:
+                        line = line.strip()
+                        # Handle FASTA headers
+                        if line.startswith('>'):
+                            if current_seq:
+                                sequences.append(current_seq)
+                                current_seq = ""
+                            continue
+                        # Only accept A, T, G, C sequences
+                        if set(line.upper()) <= set('ATGC'):
+                            current_seq += line.upper()
+
+                    # Add the last sequence if exists
+                    if current_seq:
+                        sequences.append(current_seq)
+                else:
+                    logger.info(f"Detected plain text format (one sequence per line) for {file_path}")
+                    # Process as plain text with one sequence per line
+                    for line in f:
+                        line = line.strip()
+                        if line:  # Skip empty lines
+                            # Filter to only keep A, T, G, C characters
+                            filtered_seq = ''.join(c for c in line.upper() if c in 'ATGC')
+                            if filtered_seq:
+                                sequences.append(filtered_seq)
+
+        logger.info(
+            f"Loaded {len(sequences)} sequences from {total_files} files ({fasta_files} FASTA format, {total_files - fasta_files} plain text)")
+        return sequences
+
+    def _prepare_chunks(self) -> List[str]:
+        """
+        Split sequences into chunks with variable lengths, including reverse complements.
+        Handles sequences shorter than chunk_size by including them directly if they meet
+        the minimum length requirement.
+
+        Returns:
+            List of chunks
+        """
         chunks = []
 
-        # Truncate very long sequences for safety
-        if len(sequence) > self.max_safe_sequence_length:
-            sequence = sequence[:self.max_safe_sequence_length]
+        # Track statistics for logging
+        total_sequences = len(self.sequences)
+        truncated_count = 0
+        rc_count = 0  # Counter for reverse complements
+        short_seq_count = 0  # Counter for sequences shorter than chunk_size
 
-        # Handle sequences shorter than chunk_size
-        if len(sequence) < self.chunk_size:
-            if len(sequence) >= 100:  # Keep the same minimum size check
-                encoding = self._create_encoding(sequence)
-                if encoding:
-                    chunks.append(encoding)
+        for sequence in self.sequences:
+            # Truncate very long sequences for safety
+            if len(sequence) > self.max_safe_sequence_length:
+                truncated_count += 1
+                sequence = sequence[:self.max_safe_sequence_length]
 
-                # Add reverse complement if enabled
-                if self.use_reverse_complement:
-                    rc_seq = reverse_complement(sequence)
-                    rc_encoding = self._create_encoding(rc_seq)
-                    if rc_encoding:
-                        chunks.append(rc_encoding)
-        else:
-            # Standard chunks for primary training
-            for i in range(0, len(sequence) - self.chunk_size + 1, self.stride):
-                chunk = sequence[i:i + self.chunk_size]
-                if len(chunk) >= 100:  # Only keep reasonably sized chunks
-                    encoding = self._create_encoding(chunk)
-                    if encoding:
-                        chunks.append(encoding)
+            # Handle sequences shorter than chunk_size
+            if len(sequence) < self.chunk_size:
+                if len(sequence) >= 100:  # Keep the same minimum size check
+                    chunks.append(sequence)
+                    short_seq_count += 1
 
                     # Add reverse complement if enabled
                     if self.use_reverse_complement:
-                        rc_chunk = reverse_complement(chunk)
-                        rc_encoding = self._create_encoding(rc_chunk)
-                        if rc_encoding:
-                            chunks.append(rc_encoding)
+                        rc_seq = reverse_complement(sequence)
+                        chunks.append(rc_seq)
+                        rc_count += 1
+            else:
+                # Standard chunks for primary training - no change for longer sequences
+                for i in range(0, len(sequence) - self.chunk_size + 1, self.stride):
+                    chunk = sequence[i:i + self.chunk_size]
+                    if len(chunk) >= 100:  # Only keep reasonably sized chunks
+                        chunks.append(chunk)
 
-            # Optionally add longer chunks for extrapolation training
-            if self.sample_long_sequences and len(sequence) > self.chunk_size * 2:
-                # Add a few longer chunks - up to 2-4x the normal chunk size
-                for _ in range(min(2, len(sequence) // (self.chunk_size * 2))):  # Add just a few longer samples
-                    long_size = random.randint(int(self.chunk_size * 1.5),
-                                               min(len(sequence), int(self.chunk_size * 4)))
-                    if len(sequence) > long_size:
-                        start = random.randint(0, len(sequence) - long_size)
-                        long_chunk = sequence[start:start + long_size]
-                        encoding = self._create_encoding(long_chunk)
-                        if encoding:
-                            chunks.append(encoding)
-
-                        # Add reverse complement for long chunks too
+                        # Add reverse complement if enabled
                         if self.use_reverse_complement:
-                            rc_long_chunk = reverse_complement(long_chunk)
-                            rc_encoding = self._create_encoding(rc_long_chunk)
-                            if rc_encoding:
-                                chunks.append(rc_encoding)
+                            rc_chunk = reverse_complement(chunk)
+                            chunks.append(rc_chunk)
+                            rc_count += 1
+
+                # Optionally add longer chunks for extrapolation training
+                if self.sample_long_sequences and len(sequence) > self.chunk_size * 2:
+                    # Add a few longer chunks - up to 2-4x the normal chunk size
+                    for _ in range(min(2, len(sequence) // (self.chunk_size * 2))):  # Add just a few longer samples
+                        long_size = random.randint(int(self.chunk_size * 1.5),
+                                                   min(len(sequence), int(self.chunk_size * 4)))
+                        if len(sequence) > long_size:
+                            start = random.randint(0, len(sequence) - long_size)
+                            long_chunk = sequence[start:start + long_size]
+                            chunks.append(long_chunk)
+
+                            # Add reverse complement for long chunks too
+                            if self.use_reverse_complement:
+                                rc_long_chunk = reverse_complement(long_chunk)
+                                chunks.append(rc_long_chunk)
+                                rc_count += 1
+
+        # Log statistics
+        if truncated_count > 0:
+            logger.warning(
+                f"Truncated {truncated_count} out of {total_sequences} sequences that exceeded maximum safe length of {self.max_safe_sequence_length}")
+
+        if short_seq_count > 0:
+            logger.info(f"Included {short_seq_count} sequences shorter than chunk_size but meeting minimum length")
+
+        if self.use_reverse_complement and rc_count > 0:
+            logger.info(f"Added {rc_count} reverse complement sequences for augmentation")
 
         return chunks
 
-    def _create_encoding(self, sequence):
-        """Create tokenized encoding directly."""
+    def __len__(self):
+        """Return the number of chunks."""
+        return len(self.chunks)
+
+    def __getitem__(self, idx):
+        """
+        Get a tokenized sequence with appropriate length handling.
+
+        Args:
+            idx: Index of the chunk
+
+        Returns:
+            Tokenized sequence
+        """
         try:
-            # Filter sequence to only include valid characters
-            sequence = ''.join(c for c in sequence.upper() if c in 'ATGC')
-            if not sequence:
-                return None
+            sequence = self.chunks[idx]
 
             # Use pre_training_length as the guide for maximum sequence length
             max_seq_length = self.pre_training_length
 
-            # Use the tokenizer with proper settings
+            # Apply sensible limit if sequence is extremely long
+            very_long_threshold = min(50000, self.max_safe_sequence_length)
+            if len(sequence) > very_long_threshold:
+                start = random.randint(0, len(sequence) - very_long_threshold)
+                sequence = sequence[start:start + very_long_threshold]
+                logger.debug(f"Truncated very long sequence from original length to {very_long_threshold}")
+
+            # Filter the sequence to only include valid characters
+            sequence = ''.join(c for c in sequence.upper() if c in 'ATGC')
+
+            # Check if sequence is empty after filtering
+            if not sequence:
+                logger.warning("Empty sequence after filtering. Using dummy sequence.")
+                sequence = "ATGC" * 32  # Use a dummy sequence
+
+            # Use the tokenizer directly with proper truncation and padding
             encoding = self.tokenizer(
                 sequence,
                 truncation=True,
                 padding='max_length',
-                max_length=max_seq_length,
+                max_length=max_seq_length,  # Use pre_training_length as max length
                 return_tensors='pt'
             )
 
-            # Remove the batch dimension
+            # Remove the batch dimension added by return_tensors='pt'
             encoding = {k: v.squeeze(0) for k, v in encoding.items()}
 
             # Ensure we have token_type_ids
             if 'token_type_ids' not in encoding:
                 encoding['token_type_ids'] = torch.zeros_like(encoding['input_ids'])
 
-            # Verify and clamp token IDs
+            # CRITICAL FIX: Verify and clamp token IDs
             if 'input_ids' in encoding:
                 vocab_size = self.tokenizer.vocab_size
                 max_id = encoding['input_ids'].max().item()
 
                 if max_id >= vocab_size:
+                    logger.warning(f"Found token ID {max_id} exceeding vocab size {vocab_size}")
+                    # Replace out-of-range IDs with UNK token ID
                     mask = encoding['input_ids'] >= vocab_size
                     unk_token_id = getattr(self.tokenizer, 'unk_token_id', 0)
                     encoding['input_ids'] = torch.where(
@@ -221,11 +299,22 @@ class GenomicDataset(torch.utils.data.IterableDataset):
                         encoding['input_ids']
                     )
 
+                    # Double-check the fix worked
+                    if encoding['input_ids'].max().item() >= vocab_size:
+                        logger.error("Failed to clamp token IDs to vocab size")
+                        return self._get_fallback_encoding(max_seq_length)
+
+            # Verify encoding looks valid
+            if encoding['input_ids'].size(0) == 0:
+                logger.error("Tokenizer returned empty input_ids")
+                return self._get_fallback_encoding(max_seq_length)
+
             return encoding
 
         except Exception as e:
-            logger.debug(f"Encoding failed: {e}")
-            return None
+            # Log the error but return a fallback encoding
+            logger.error(f"Error in dataset.__getitem__: {e}")
+            return self._get_fallback_encoding(max_seq_length)
 
     def _get_fallback_encoding(self, length):
         """
@@ -243,104 +332,7 @@ class GenomicDataset(torch.utils.data.IterableDataset):
             "token_type_ids": torch.zeros(length, dtype=torch.long)
         }
 
-    def __len__(self):
-        """Return the number of chunks."""
-        return len(self.chunks)
 
-    def __iter__(self):
-        """Iterator with proper sharding for Accelerate."""
-        # Get worker info for multi-worker dataloaders
-        worker_info = torch.utils.data.get_worker_info()
-
-        # Get Accelerate state for distributed training
-        from accelerate.state import AcceleratorState
-        state = AcceleratorState()
-
-        # Calculate shard index and total shards
-        num_processes = getattr(state, 'num_processes', 1)
-        process_index = getattr(state, 'process_index', 0)
-
-        num_shards = num_processes
-        if worker_info:
-            num_shards *= worker_info.num_workers
-            shard_idx = process_index * worker_info.num_workers + worker_info.id
-        else:
-            shard_idx = process_index
-
-        # Shard files deterministically across processes/workers
-        file_paths = self.file_paths.copy()
-        num_files = len(file_paths)
-        files_per_shard = max(1, num_files // num_shards)
-        shard_start = shard_idx * files_per_shard
-        shard_end = min(shard_start + files_per_shard, num_files) if shard_idx < num_shards - 1 else num_files
-
-        # Get files for this shard
-        shard_files = file_paths[shard_start:shard_end]
-
-        logger.info(f"Process {process_index} worker {worker_info.id if worker_info else 0} "
-                    f"processing {len(shard_files)} files ({shard_start}-{shard_end})")
-
-        # Set RNG state for deterministic behavior
-        rng = random.Random(42 + self.epoch * 100 + shard_idx)
-
-        # Process files in this shard
-        for file_path in shard_files:
-            try:
-                current_seq = ""
-                is_fasta = False
-
-                # Check file format first
-                with open(file_path, 'r') as peek_f:
-                    first_lines = [peek_f.readline().strip() for _ in range(min(5, os.path.getsize(file_path)))]
-                    is_fasta = any(line.startswith('>') for line in first_lines if line)
-
-                with open(file_path, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-
-                        # Handle FASTA headers
-                        if is_fasta and line.startswith('>'):
-                            if current_seq:
-                                chunks = self._process_sequence(current_seq)
-                                rng.shuffle(chunks)  # Shuffle chunks for better mixing
-                                for chunk in chunks:
-                                    yield chunk
-                                current_seq = ""
-                            continue
-
-                        # Only process valid nucleotides
-                        if set(line.upper()) <= set('ATGC'):
-                            current_seq += line.upper()
-
-                            # Process each line separately for non-FASTA
-                            if not is_fasta:
-                                chunks = self._process_sequence(current_seq)
-                                rng.shuffle(chunks)
-                                for chunk in chunks:
-                                    yield chunk
-                                current_seq = ""
-
-                # Process final sequence in FASTA files
-                if is_fasta and current_seq:
-                    chunks = self._process_sequence(current_seq)
-                    rng.shuffle(chunks)
-                    for chunk in chunks:
-                        yield chunk
-
-            except Exception as e:
-                logger.error(f"Error processing file {file_path}: {e}")
-                continue
-
-    def __getitem__(self, idx):
-        """
-        Required for backward compatibility - will raise an error if called.
-        This is implemented because the original class has it, but our streaming
-        implementation doesn't support random access.
-        """
-        raise NotImplementedError(
-            "Random access via __getitem__ is not supported in streaming mode. "
-            "Use iteration instead through DataLoader."
-        )
 
 class GenomicMLMDataCollator(DataCollatorForLanguageModeling):
     """

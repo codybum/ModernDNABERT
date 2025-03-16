@@ -623,8 +623,9 @@ def train_with_accelerate(args, accelerator):
             train_dataset,
             batch_size=args.batch_size,
             collate_fn=data_collator,
-            num_workers=0,  # Use 0 for most reliable streaming behavior
+            num_workers=0,  # Avoid worker processes to prevent RNG issues
             pin_memory=torch.cuda.is_available(),
+            sampler=train_sampler
         )
     else:
         # Single-process mode
@@ -666,7 +667,7 @@ def train_with_accelerate(args, accelerator):
     )
 
     # Apply sequence length overrides for testing if specified
-    if hasattr(args, 'gth') and args.gth is not None:
+    if args.test_sequence_length is not None:
         logger.info(f"TEST MODE: Enforcing sequence length of {args.test_sequence_length}")
         args.pre_training_length = args.test_sequence_length
         args.max_supported_model_length = args.test_sequence_length
@@ -702,9 +703,6 @@ def train_with_accelerate(args, accelerator):
         logger.info("\nInitial length extrapolation test:")
         test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
 
-    # Ensure all processes are synchronized after the test
-    accelerator.wait_for_everyone()
-
     # Resume from checkpoint if needed
     starting_epoch, completed_steps = resume_from_checkpoint(accelerator, args, num_update_steps_per_epoch)
 
@@ -731,10 +729,6 @@ def train_with_accelerate(args, accelerator):
 
     # Main training loop
     for epoch in range(starting_epoch, args.epochs):
-
-        if hasattr(train_dataset, 'set_epoch'):
-            train_dataset.set_epoch(epoch)
-
         model.train()
         total_loss = 0
         valid_steps = 0  # Count successful steps for averaging
