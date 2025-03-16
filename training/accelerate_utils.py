@@ -666,7 +666,7 @@ def train_with_accelerate(args, accelerator):
     )
 
     # Apply sequence length overrides for testing if specified
-    if args.test_sequence_length is not None:
+    if args.gth is not None:
         logger.info(f"TEST MODE: Enforcing sequence length of {args.test_sequence_length}")
         args.pre_training_length = args.test_sequence_length
         args.max_supported_model_length = args.test_sequence_length
@@ -700,7 +700,10 @@ def train_with_accelerate(args, accelerator):
     # Test initial extrapolation
     if accelerator.is_main_process:
         logger.info("\nInitial length extrapolation test:")
-        test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
+    test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
+
+    # Ensure all processes are synchronized after the test
+    accelerator.wait_for_everyone()
 
     # Resume from checkpoint if needed
     starting_epoch, completed_steps = resume_from_checkpoint(accelerator, args, num_update_steps_per_epoch)

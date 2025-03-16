@@ -46,110 +46,125 @@ def test_sequence_length_extrapolation(accelerator, model, tokenizer, test_seque
     Returns:
         List of test results
     """
-    # Use the model on its current device through accelerator
-    model.eval()
+    # Ensure all processes are synchronized at the start
+    accelerator.wait_for_everyone()
 
-    logger.info("\n" + "=" * 50)
-    logger.info(f"RUNNING LENGTH EXTRAPOLATION TEST ON {str(accelerator.device).upper()}")
-    logger.info("=" * 50)
-
+    # Initialize results list for all processes
     results = []
-    for seq in test_sequences:
-        try:
-            # Validate sequence first
-            if not seq or not isinstance(seq, str):
-                logger.warning(f"Invalid sequence: {type(seq)}. Skipping.")
-                continue
 
-            # Filter sequence to only valid nucleotides
-            seq = seq.upper()
-            seq = ''.join(c for c in seq if c in 'ATGC')
+    # Only run actual test on main process to avoid distributed issues
+    if accelerator.is_main_process:
+        # Use the model on its current device through accelerator
+        model.eval()
 
-            if not seq:
-                logger.warning("Sequence contains no valid nucleotides. Skipping.")
-                continue
+        logger.info("\n" + "=" * 50)
+        logger.info(f"RUNNING LENGTH EXTRAPOLATION TEST ON {str(accelerator.device).upper()}")
+        logger.info("=" * 50)
 
-            # Tokenize with error handling and truncation safety
+        for seq in test_sequences:
             try:
-                encoding = tokenizer(
-                    seq,
-                    truncation=True,  # Enable truncation for safety
-                    padding=False,
-                    return_tensors="pt"
-                )
-            except Exception as e:
-                logger.error(f"Tokenization failed: {e}")
-                continue
+                # Validate sequence first
+                if not seq or not isinstance(seq, str):
+                    logger.warning(f"Invalid sequence: {type(seq)}. Skipping.")
+                    continue
 
-            # Verify encoding has expected keys
-            if "input_ids" not in encoding:
-                logger.error("Tokenizer didn't return input_ids")
-                continue
+                # Filter sequence to only valid nucleotides
+                seq = seq.upper()
+                seq = ''.join(c for c in seq if c in 'ATGC')
 
-            # Get tokenized length
-            seq_length = encoding["input_ids"].shape[1]
+                if not seq:
+                    logger.warning("Sequence contains no valid nucleotides. Skipping.")
+                    continue
 
-            # Continue with evaluation...
-            with torch.no_grad():
+                # Tokenize with error handling and truncation safety
                 try:
-                    # Create labels for perplexity calculation
-                    labels = encoding["input_ids"].clone()
-                    encoding["labels"] = labels
+                    encoding = tokenizer(
+                        seq,
+                        truncation=True,  # Enable truncation for safety
+                        padding=False,
+                        return_tensors="pt"
+                    )
+                except Exception as e:
+                    logger.error(f"Tokenization failed: {e}")
+                    continue
 
-                    # Move tensors to accelerator device
-                    encoding = {k: v.to(accelerator.device) for k, v in encoding.items()}
+                # Verify encoding has expected keys
+                if "input_ids" not in encoding:
+                    logger.error("Tokenizer didn't return input_ids")
+                    continue
 
-                    # Run inference
-                    outputs = model(**encoding)
+                # Get tokenized length
+                seq_length = encoding["input_ids"].shape[1]
 
-                    # Record success and perplexity
-                    perplexity = torch.exp(outputs.loss).item() if hasattr(outputs, 'loss') else None
-                    results.append({
-                        "length": seq_length,
-                        "success": True,
-                        "perplexity": perplexity,
-                        "error": None
-                    })
+                # Continue with evaluation...
+                with torch.no_grad():
+                    try:
+                        # Create labels for perplexity calculation
+                        labels = encoding["input_ids"].clone()
+                        encoding["labels"] = labels
 
-                    logger.info(f"✓ Successfully processed sequence of length {seq_length}")
-                    if perplexity:
-                        logger.info(f"  Perplexity: {perplexity:.4f}")
+                        # Move tensors to accelerator device
+                        encoding = {k: v.to(accelerator.device) for k, v in encoding.items()}
 
-                except RuntimeError as e:
-                    # Handle CUDA OOM specifically
-                    if "CUDA out of memory" in str(e):
-                        logger.warning(f"GPU OOM for sequence length {seq_length}, falling back to CPU")
-                        # Try on CPU as fallback
-                        try:
-                            # Move to CPU for this sequence only
-                            cpu_encoding = {k: v.to('cpu') for k, v in encoding.items()}
+                        # Run inference
+                        outputs = model(**encoding)
 
-                            cpu_model = accelerator.unwrap_model(model).to('cpu')
-                            cpu_outputs = cpu_model(**cpu_encoding)
+                        # Record success and perplexity
+                        perplexity = torch.exp(outputs.loss).item() if hasattr(outputs, 'loss') else None
+                        results.append({
+                            "length": seq_length,
+                            "success": True,
+                            "perplexity": perplexity,
+                            "error": None
+                        })
 
-                            # Calculate perplexity and record
-                            cpu_perplexity = torch.exp(cpu_outputs.loss).item() if hasattr(cpu_outputs,
-                                                                                           'loss') else None
-                            results.append({
-                                "length": seq_length,
-                                "success": True,
-                                "perplexity": cpu_perplexity,
-                                "error": None,
-                                "used_fallback": True
-                            })
-                            logger.info(f"✓ Successfully processed sequence of length {seq_length} on CPU fallback")
+                        logger.info(f"✓ Successfully processed sequence of length {seq_length}")
+                        if perplexity:
+                            logger.info(f"  Perplexity: {perplexity:.4f}")
 
-                            # Move model back to original device
-                            accelerator.unwrap_model(model).to(accelerator.device)
-                        except Exception as cpu_e:
-                            logger.error(f"CPU fallback also failed: {cpu_e}")
+                    except RuntimeError as e:
+                        # Handle CUDA OOM specifically
+                        if "CUDA out of memory" in str(e):
+                            logger.warning(f"GPU OOM for sequence length {seq_length}, falling back to CPU")
+                            # Try on CPU as fallback
+                            try:
+                                # Move to CPU for this sequence only
+                                cpu_encoding = {k: v.to('cpu') for k, v in encoding.items()}
+
+                                cpu_model = accelerator.unwrap_model(model).to('cpu')
+                                cpu_outputs = cpu_model(**cpu_encoding)
+
+                                # Calculate perplexity and record
+                                cpu_perplexity = torch.exp(cpu_outputs.loss).item() if hasattr(cpu_outputs,
+                                                                                               'loss') else None
+                                results.append({
+                                    "length": seq_length,
+                                    "success": True,
+                                    "perplexity": cpu_perplexity,
+                                    "error": None,
+                                    "used_fallback": True
+                                })
+                                logger.info(f"✓ Successfully processed sequence of length {seq_length} on CPU fallback")
+
+                                # Move model back to original device
+                                accelerator.unwrap_model(model).to(accelerator.device)
+                            except Exception as cpu_e:
+                                logger.error(f"CPU fallback also failed: {cpu_e}")
+                                results.append({
+                                    "length": seq_length,
+                                    "success": False,
+                                    "perplexity": None,
+                                    "error": str(e) + " | CPU fallback: " + str(cpu_e)
+                                })
+                        else:
+                            logger.error(f"Model inference failed: {e}")
                             results.append({
                                 "length": seq_length,
                                 "success": False,
                                 "perplexity": None,
-                                "error": str(e) + " | CPU fallback: " + str(cpu_e)
+                                "error": str(e)
                             })
-                    else:
+                    except Exception as e:
                         logger.error(f"Model inference failed: {e}")
                         results.append({
                             "length": seq_length,
@@ -157,27 +172,24 @@ def test_sequence_length_extrapolation(accelerator, model, tokenizer, test_seque
                             "perplexity": None,
                             "error": str(e)
                         })
-                except Exception as e:
-                    logger.error(f"Model inference failed: {e}")
-                    results.append({
-                        "length": seq_length,
-                        "success": False,
-                        "perplexity": None,
-                        "error": str(e)
-                    })
-        except Exception as outer_e:
-            logger.error(f"Unexpected error in sequence testing: {outer_e}")
+            except Exception as outer_e:
+                logger.error(f"Unexpected error in sequence testing: {outer_e}")
 
-    # Summarize results
-    success_lengths = [r["length"] for r in results if r["success"]]
-    if success_lengths:
-        logger.info(f"\nSuccessfully handled sequences from {min(success_lengths)} to {max(success_lengths)} tokens")
-    else:
-        logger.info("\nFailed to handle any test sequences")
+        # Summarize results
+        success_lengths = [r["length"] for r in results if r["success"]]
+        if success_lengths:
+            logger.info(
+                f"\nSuccessfully handled sequences from {min(success_lengths)} to {max(success_lengths)} tokens")
+        else:
+            logger.info("\nFailed to handle any test sequences")
 
-    # Clean up memory
-    torch.cuda.empty_cache()
+        # Clean up memory
+        torch.cuda.empty_cache()
 
+    # Make sure all processes wait until test is complete on main process
+    accelerator.wait_for_everyone()
+
+    # Return results (will be populated on main process, empty on others)
     return results
 
 def get_optimal_batch_size(seq_length, available_memory_gb, base_batch_size=16):
