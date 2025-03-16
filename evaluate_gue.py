@@ -20,9 +20,9 @@ from transformers import (
     set_seed
 )
 
-# Import your custom modules here
+# Updated import for the new tokenizer approach
 from modeling.alibi_attention import create_genomic_bert_config, create_genomic_bert_model
-from tokenization.genomic_tokenizer import GenomicTokenizer
+from tokenization.genomic_utils import load_genomic_tokenizer
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -336,9 +336,9 @@ def evaluate_on_task(model_path, tokenizer_path, task_path, output_dir, task_nam
     # Set random seed
     set_seed(seed)
 
-    # Load tokenizer
+    # Load tokenizer using the new approach
     logger.info(f"Loading tokenizer from {tokenizer_path}")
-    tokenizer = GenomicTokenizer.from_pretrained(tokenizer_path)
+    tokenizer = load_genomic_tokenizer(tokenizer_path)
 
     # Load datasets
     train_dataset = GUEDataset(

@@ -12,7 +12,6 @@ import logging
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 
