@@ -614,7 +614,7 @@ def save_checkpoint(accelerator, args, epoch, step, model, optimizer, lr_schedul
 
     # Save tokenizer on main process only
     if accelerator.is_main_process and tokenizer is not None:
-        tokenizer.save_pretrained(os.path.join(checkpoint_path, "tokenizer"))
+        tokenizer.save_pretrained(checkpoint_path)
 
     # Clean up old checkpoints (only keep N most recent)
     if accelerator.is_main_process and args.save_total_limit is not None:
@@ -742,9 +742,8 @@ def save_model(accelerator, model, tokenizer, output_dir):
         # Save tokenizer if provided
         if tokenizer is not None:
             try:
-                tokenizer_path = os.path.join(output_dir, "tokenizer")
-                tokenizer.save_pretrained(tokenizer_path)
-                logger.info(f"Tokenizer saved to {tokenizer_path}")
+                tokenizer.save_pretrained(output_dir)
+                logger.info(f"Tokenizer saved to {output_dir}")
             except Exception as e:
                 logger.error(f"Error saving tokenizer: {e}")
 
