@@ -974,6 +974,15 @@ def save_checkpoint(accelerator, args, epoch, step, model, optimizer, lr_schedul
     # Use Accelerate's state saving
     accelerator.save_state(checkpoint_path)
 
+    # Save config.json on main process only
+    if accelerator.is_main_process:
+        # Unwrap the model to access its config
+        unwrapped_model = accelerator.unwrap_model(model)
+
+        # Save just the config.json file (not model weights again)
+        unwrapped_model.config.save_pretrained(checkpoint_path)
+        logger.info(f"Saved model config to {checkpoint_path}")
+
     # Save tokenizer on main process only
     if accelerator.is_main_process and tokenizer is not None:
         tokenizer.save_pretrained(checkpoint_path)
@@ -984,7 +993,6 @@ def save_checkpoint(accelerator, args, epoch, step, model, optimizer, lr_schedul
 
     # Wait for checkpoint saving to complete
     accelerator.wait_for_everyone()
-
 
 def cleanup_checkpoints(output_dir, save_total_limit):
     """Clean up old checkpoints, keeping only the most recent ones."""
