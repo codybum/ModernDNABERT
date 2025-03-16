@@ -80,8 +80,6 @@ echo "GUE data path: $GUE_PATH"
 echo "Output directory: $OUTPUT_DIR"
 echo "Number of GPUs: $NUM_GPUS"
 echo "Using ALiBi attention: $USE_ALIBI"
-echo "Model was trained with pre_training_length=6144, max_inference_length=24576"
-echo "Current configuration uses massive batch sizes and sequence lengths to utilize GPU resources"
 
 # Calculate batch size based on having 8 GPUs with 144GB VRAM each
 # With such massive GPU memory and low utilization reported, we need to dramatically increase batch sizes
