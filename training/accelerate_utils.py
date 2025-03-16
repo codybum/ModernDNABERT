@@ -623,9 +623,8 @@ def train_with_accelerate(args, accelerator):
             train_dataset,
             batch_size=args.batch_size,
             collate_fn=data_collator,
-            num_workers=0,  # Avoid worker processes to prevent RNG issues
+            num_workers=0,  # Use 0 for most reliable streaming behavior
             pin_memory=torch.cuda.is_available(),
-            sampler=train_sampler
         )
     else:
         # Single-process mode
@@ -729,6 +728,10 @@ def train_with_accelerate(args, accelerator):
 
     # Main training loop
     for epoch in range(starting_epoch, args.epochs):
+
+        if hasattr(train_dataset, 'set_epoch'):
+            train_dataset.set_epoch(epoch)
+
         model.train()
         total_loss = 0
         valid_steps = 0  # Count successful steps for averaging
