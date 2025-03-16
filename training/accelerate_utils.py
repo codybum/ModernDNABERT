@@ -700,7 +700,7 @@ def train_with_accelerate(args, accelerator):
     # Test initial extrapolation
     if accelerator.is_main_process:
         logger.info("\nInitial length extrapolation test:")
-    test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
+        test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
 
     # Ensure all processes are synchronized after the test
     accelerator.wait_for_everyone()
