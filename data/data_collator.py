@@ -95,76 +95,66 @@ class GenomicDataset(Dataset):
 
     def _load_sequences(self, file_paths: List[str]) -> List[str]:
         """
-        Load genomic sequences from FASTA files.
+        Load genomic sequences from files - supports both FASTA format and
+        plain text with one sequence per line.
 
         Args:
-            file_paths: List of FASTA file paths
+            file_paths: List of file paths
 
         Returns:
             List of sequences
         """
         sequences = []
+        total_files = 0
+        fasta_files = 0
 
         for file_path in file_paths:
+            logger.info(f"Loading sequences from {file_path}")
+            total_files += 1
+
             with open(file_path, 'r') as f:
-                current_seq = ""
-                for line in f:
-                    line = line.strip()
-                    # Skip FASTA headers
-                    if line.startswith('>'):
-                        if current_seq:
-                            sequences.append(current_seq)
-                            current_seq = ""
-                        continue
-                    # Only accept A, T, G, C sequences, ignore others
-                    if set(line.upper()) <= set('ATGC'):
-                        current_seq += line.upper()
+                # Read the first few lines to detect format
+                peek = [next(f, '').strip() for _ in range(5)]
+                f.seek(0)  # Reset to beginning
 
-                # Add the last sequence if exists
-                if current_seq:
-                    sequences.append(current_seq)
+                # Check if any line starts with '>' - indicating FASTA format
+                is_fasta = any(line.startswith('>') for line in peek if line)
 
+                if is_fasta:
+                    fasta_files += 1
+                    logger.info(f"Detected FASTA format for {file_path}")
+                    current_seq = ""
+                    for line in f:
+                        line = line.strip()
+                        # Handle FASTA headers
+                        if line.startswith('>'):
+                            if current_seq:
+                                sequences.append(current_seq)
+                                current_seq = ""
+                            continue
+                        # Only accept A, T, G, C sequences
+                        if set(line.upper()) <= set('ATGC'):
+                            current_seq += line.upper()
+
+                    # Add the last sequence if exists
+                    if current_seq:
+                        sequences.append(current_seq)
+                else:
+                    logger.info(f"Detected plain text format (one sequence per line) for {file_path}")
+                    # Process as plain text with one sequence per line
+                    for line in f:
+                        line = line.strip()
+                        if line:  # Skip empty lines
+                            # Filter to only keep A, T, G, C characters
+                            filtered_seq = ''.join(c for c in line.upper() if c in 'ATGC')
+                            if filtered_seq:
+                                sequences.append(filtered_seq)
+
+        logger.info(
+            f"Loaded {len(sequences)} sequences from {total_files} files ({fasta_files} FASTA format, {total_files - fasta_files} plain text)")
         return sequences
 
     def _prepare_chunks(self) -> List[str]:
-        """
-        Split sequences into chunks with variable lengths, including reverse complements.
-        """
-        chunks = []
-
-        # Track statistics for logging
-        total_sequences = len(self.sequences)
-        truncated_count = 0
-        rc_count = 0  # Counter for reverse complements
-        short_seq_count = 0  # Counter for sequences shorter than chunk_size
-        short_seq_usable = 0  # Counter for short sequences that meet the length requirement
-
-        logger.info(f"Starting with {total_sequences} input sequences")
-        logger.info(f"Using chunk_size={self.chunk_size}, min_length=100")
-
-        # Add length distribution analysis
-        seq_lengths = [len(seq) for seq in self.sequences]
-        if seq_lengths:
-            logger.info(
-                f"Sequence length stats: min={min(seq_lengths)}, max={max(seq_lengths)}, avg={sum(seq_lengths) / len(seq_lengths):.1f}")
-            # Count sequences by length range
-            under_100 = sum(1 for l in seq_lengths if l < 100)
-            under_chunk = sum(1 for l in seq_lengths if 100 <= l < self.chunk_size)
-            over_chunk = sum(1 for l in seq_lengths if l >= self.chunk_size)
-            logger.info(
-                f"Length distribution: <100bp: {under_100}, 100-{self.chunk_size}bp: {under_chunk}, ≥{self.chunk_size}bp: {over_chunk}")
-
-        # Rest of the method remains the same as in my previous response...
-
-        logger.info(f"Final chunks breakdown:")
-        logger.info(f"  From short sequences: {short_seq_usable}")
-        logger.info(f"  From chunking long sequences: {len(chunks) - short_seq_usable - rc_count}")
-        logger.info(f"  From reverse complements: {rc_count}")
-        logger.info(f"  Total chunks: {len(chunks)}")
-
-        return chunks
-
-    def _prepare_chunks_old(self) -> List[str]:
         """
         Split sequences into chunks with variable lengths, including reverse complements.
         Handles sequences shorter than chunk_size by including them directly if they meet
