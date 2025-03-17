@@ -642,68 +642,6 @@ def cpu_optimized_prepare_data(input_files: List[str], output_file: str, sample_
 # Modify the cpu_optimized_prepare_data function to improve handling of the output file
 # This is a partial example - implement in your main function
 
-def fixed_cpu_optimized_prepare_data(input_files, output_file, sample_size=None, num_workers=None,
-                                     seq_chunk_size=1000, stride=500, max_safe_sequence_length=50000):
-    # ... [keep all the existing code until the file writing part] ...
-
-    # Part that needs changing - REPLACE this section in your function:
-
-    # Modify the minimum sequence length to be more permissive
-    min_seq_length = 5  # Reduced from previous values to ensure we get some content
-
-    logger.info(f"Writing {len(all_sequences)} sequences to {output_file}")
-
-    # Ensure output directory exists
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-
-    # First check if any sequences would be written
-    # See how many sequences would pass our length filter
-    eligible_seqs = [seq for seq in all_sequences if len(seq) >= min_seq_length]
-    if not eligible_seqs:
-        logger.warning(f"No sequences longer than {min_seq_length} found! Using all sequences regardless of length.")
-        eligible_seqs = all_sequences  # Just use all sequences
-        min_seq_length = 1  # Accept any non-empty sequence
-
-    logger.info(f"{len(eligible_seqs)} sequences eligible for writing (min length: {min_seq_length})")
-
-    # Sample if needed and if we have enough sequences
-    if sample_size and len(eligible_seqs) > sample_size:
-        logger.info(f"Sampling {sample_size} sequences from {len(eligible_seqs)} eligible sequences")
-        eligible_seqs = random.sample(eligible_seqs, sample_size)
-
-    # Apply length limit only here, after we've selected our sample
-    for i, seq in enumerate(eligible_seqs):
-        if len(seq) > max_safe_sequence_length:
-            eligible_seqs[i] = seq[:max_safe_sequence_length]
-
-    # CRITICAL FIX: Write directly to file without chunking for now
-    # This is a simple approach to ensure we get content in the file
-    sequences_written = 0
-    try:
-        with open(output_file, 'w') as f:
-            for seq in eligible_seqs:
-                f.write(seq + '\n')
-                sequences_written += 1
-    except Exception as e:
-        logger.error(f"Error writing to file: {e}")
-
-    logger.info(f"Wrote {sequences_written} sequences to {output_file}")
-
-    # Verify the file has content
-    exists, line_count, sample_lines = check_file_content(output_file)
-    if not exists or line_count == 0:
-        logger.error("Failed to create output file with content!")
-        # Create a simple fallback file with basic DNA sequences if needed
-        logger.warning("Creating fallback sequence file...")
-        with open(output_file, 'w') as f:
-            for i in range(1000):  # Create 1000 simple sequences
-                seq = ''.join(random.choice('ATGC') for _ in range(100))  # 100bp sequences
-                f.write(seq + '\n')
-        logger.info(f"Created fallback sequence file with 1000 synthetic sequences")
-        check_file_content(output_file)  # Verify it worked
-
-    return output_file
-
 
 def cpu_optimized_prepare_data(input_files: List[str], output_file: str, sample_size: Optional[int] = None,
                                num_workers: int = None, seq_chunk_size: int = 1000, stride: int = 500,
