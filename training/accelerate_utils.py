@@ -495,13 +495,9 @@ def train_with_accelerate(args, accelerator):
     """
     logger = logging.getLogger(__name__)
 
-    # Set random seed for reproducibility
+    # Set random seed for reproducibility with process-specific offset
     if args.seed is not None:
-        # Use deterministic per-process seeds
-        global_seed = args.seed
-        process_seed = global_seed + accelerator.process_index
-
-        # Set all RNG states with process-specific seed
+        process_seed = args.seed + accelerator.process_index
         import random
         import numpy as np
         random.seed(process_seed)
@@ -509,8 +505,7 @@ def train_with_accelerate(args, accelerator):
         torch.manual_seed(process_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(process_seed)
-
-        logger.info(f"Process {accelerator.process_index} using seed {process_seed} (base: {global_seed})")
+        logger.info(f"Process {accelerator.process_index} using seed {process_seed}")
 
     # Create output directory
     if accelerator.is_main_process:
@@ -527,7 +522,7 @@ def train_with_accelerate(args, accelerator):
 
         tokenizer = load_genomic_tokenizer(args.tokenizer_path)
 
-        # Test tokenizer OOV handling
+        # Test tokenizer OOV handling only on main process but call on all
         if accelerator.is_main_process:
             try:
                 test_tokenizer_oov_handling(tokenizer)
@@ -615,26 +610,20 @@ def train_with_accelerate(args, accelerator):
         tokenizer=tokenizer,
         mlm_probability=args.mlm_probability,
         model=model,
-        max_seq_length=args.pre_training_length  # Pass pre_training_length to collator
+        max_seq_length=args.pre_training_length
     )
 
-    # Define worker initialization function for DataLoader
+    # Define worker initialization function
     def worker_init_fn(worker_id):
-        # Each worker needs a different seed derived from process-specific seed
-        process_seed = args.seed + accelerator.process_index * 1000
-        worker_seed = process_seed + worker_id
-
-        # Initialize all random number generators
+        # Each worker gets its own seed
+        worker_seed = args.seed + accelerator.process_index * 100 + worker_id
         import random
         import numpy as np
         random.seed(worker_seed)
         np.random.seed(worker_seed)
         torch.manual_seed(worker_seed)
-        # Note: No need to set CUDA seed in workers
 
-        logger.debug(f"Worker {worker_id} on process {accelerator.process_index} using seed {worker_seed}")
-
-    # Configure DataLoader with proper process and worker-specific seeding
+    # Configure data loader - THIS IS THE KEY CHANGE FOR FIXING RNG ISSUES
     if accelerator.num_processes > 1:
         # Create a deterministic distributed sampler
         train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -642,7 +631,7 @@ def train_with_accelerate(args, accelerator):
             num_replicas=accelerator.num_processes,
             rank=accelerator.process_index,
             shuffle=True,
-            seed=args.seed,  # Use the global seed for shuffling
+            seed=args.seed,
             drop_last=False
         )
 
@@ -711,8 +700,8 @@ def train_with_accelerate(args, accelerator):
         model, optimizer, train_dataloader, lr_scheduler
     )
 
-    # IMPORTANT: Generate test sequences for extrapolation testing with synchronized seed
-    # We do this after accelerator.prepare but before tests to ensure consistency
+    # CRITICAL: Generate test sequences with same seed on all processes
+    # so they all have the same data, but actual testing will happen later
     test_lengths = [
         args.pre_training_length,
         args.pre_training_length * 2,
@@ -721,24 +710,11 @@ def train_with_accelerate(args, accelerator):
     if args.max_inference_length:
         test_lengths.append(args.max_inference_length)
 
-    # For the extrapolation test, we'll use a fixed seed to generate the same
-    # sequences on all processes to avoid synchronization issues during testing
-    extrapolation_test_seed = 12345  # A fixed seed just for generating test sequences
-
-    # Only generate the test sequences on the main process
-    if accelerator.is_main_process:
-        # Temporarily set a fixed seed
-        saved_state = random.getstate()
-        random.seed(extrapolation_test_seed)
-        extrapolation_test_seqs = generate_test_sequences(test_lengths)
-        random.setstate(saved_state)  # Restore original random state
-
-        # Test initial extrapolation (only on main process)
-        logger.info("\nInitial length extrapolation test:")
-        test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
-
-    # Sync before continuing
-    accelerator.wait_for_everyone()
+    # Use a fixed seed just for this generation
+    saved_random_state = random.getstate()
+    random.seed(42)  # Fixed seed for test sequence generation
+    extrapolation_test_seqs = generate_test_sequences(test_lengths)
+    random.setstate(saved_random_state)  # Restore the original random state
 
     # Resume from checkpoint if needed
     starting_epoch, completed_steps = resume_from_checkpoint(accelerator, args, num_update_steps_per_epoch)
@@ -758,8 +734,11 @@ def train_with_accelerate(args, accelerator):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {max_train_steps}")
     logger.info(f"  Using distributed sampler: {has_sampler}")
-    logger.info(f"  RNG strategy: Process-specific seeds with manual control")
-    logger.info(f"  Global seed: {args.seed}")
+    logger.info(f"  RNG synchronization: disabled (using process-specific seeds)")
+
+    # IMPORTANT: Skip the initial extrapolation test in distributed context
+    # We'll do testing at the end of training instead
+    logger.info("Skipping initial extrapolation test in distributed context")
 
     # Setup progress bar (only on main process)
     progress_bar = tqdm(range(max_train_steps), disable=not accelerator.is_main_process)
@@ -771,7 +750,7 @@ def train_with_accelerate(args, accelerator):
         total_loss = 0
         valid_steps = 0  # Count successful steps for averaging
 
-        # Set epoch for distributed sampler - crucially important for proper shuffling
+        # Set epoch for distributed sampler
         if has_sampler and hasattr(train_dataloader, "sampler") and hasattr(train_dataloader.sampler, "set_epoch"):
             train_dataloader.sampler.set_epoch(epoch)
             logger.info(f"Set epoch {epoch} for distributed sampler")
@@ -828,57 +807,49 @@ def train_with_accelerate(args, accelerator):
             model, optimizer, lr_scheduler, tokenizer
         )
 
-    try:
-        if accelerator.is_main_process:
-            final_dir = os.path.join(args.output_dir, "final")
-            logger.info(f"Saving final model to {final_dir}")
-            save_model(accelerator, model, tokenizer, final_dir)
+    # We're done with distributed training, save the final model
+    if accelerator.is_main_process:
+        final_dir = os.path.join(args.output_dir, "final")
+        logger.info(f"Saving final model to {final_dir}")
+        save_model(accelerator, model, tokenizer, final_dir)
 
+    # CRITICAL: Finish the distributed training before doing evaluation
+    # Make sure all processes are synced before ending
+    accelerator.wait_for_everyone()
+
+    # Now it's safe to do single-process evaluation
+    # Only run the extrapolation test on the main process
+    # after all distributed operations are complete
+    if accelerator.is_main_process:
+        try:
+            logger.info("\nRunning final extrapolation test...")
             # Create a standalone copy of the model for testing
-            logger.info("\nPreparing model for final length extrapolation test...")
-            test_model = accelerator.unwrap_model(model)
+            unwrapped_model = accelerator.unwrap_model(model)
+            test_model = copy.deepcopy(unwrapped_model)
 
-            # Create a fresh copy to fully detach from distributed state
-            test_model = copy.deepcopy(test_model)
-
-            # Keep model on GPU for final test (just like initial test)
-            # Get the current GPU device
+            # Move to CPU or GPU as appropriate
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
             test_model = test_model.to(device)
             test_model.eval()
 
-            # Create a GPU accelerator reference similar to the original one
-            class SimpleGPUAccelerator:
+            # Create a simple accelerator-like object just for the test function
+            class SimpleAccelerator:
                 def __init__(self, device):
                     self.device = device
+                    self.is_main_process = True
 
                 def unwrap_model(self, model):
                     return model
 
-            gpu_accelerator = SimpleGPUAccelerator(device)
+            simple_accelerator = SimpleAccelerator(device)
 
-            # Final length extrapolation test
-            logger.info("\nFinal length extrapolation test:")
+            # Run the extrapolation test
+            test_sequence_length_extrapolation(simple_accelerator, test_model, tokenizer, extrapolation_test_seqs)
+        except Exception as e:
+            logger.error(f"Error in extrapolation test: {e}")
+            logger.exception("Detailed error:")
 
-            # Use the same sequences we generated earlier for consistent testing
-            # This avoids RNG synchronization issues
-            saved_state = random.getstate()
-            random.seed(extrapolation_test_seed)
-            test_seqs = generate_test_sequences(test_lengths)
-            random.setstate(saved_state)
-
-            test_sequence_length_extrapolation(gpu_accelerator, test_model, tokenizer, test_seqs)
-    except Exception as e:
-        logger.error(f"Error during final model saving or testing: {e}")
-        logger.exception("Detailed traceback:")  # Print full traceback for debugging
-        if accelerator.is_main_process:
-            logger.info("Training completed but final model saving failed. Use the last checkpoint instead.")
-
-    # At the end of your train_with_accelerate function
-    accelerator.wait_for_everyone()
-    # Let Accelerate handle cleanup operations
-    if accelerator.is_main_process:
-        logger.info("Training completed, performing final cleanup")
+    logger.info("Training completed successfully")
 
 def prepare_alibi_model_for_ddp(model):
     """
