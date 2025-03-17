@@ -497,8 +497,20 @@ def train_with_accelerate(args, accelerator):
 
     # Set random seed for reproducibility
     if args.seed is not None:
-        from accelerate.utils import set_seed
-        set_seed(args.seed)
+        # Use deterministic per-process seeds
+        global_seed = args.seed
+        process_seed = global_seed + accelerator.process_index
+
+        # Set all RNG states with process-specific seed
+        import random
+        import numpy as np
+        random.seed(process_seed)
+        np.random.seed(process_seed)
+        torch.manual_seed(process_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(process_seed)
+
+        logger.info(f"Process {accelerator.process_index} using seed {process_seed} (base: {global_seed})")
 
     # Create output directory
     if accelerator.is_main_process:
@@ -608,17 +620,21 @@ def train_with_accelerate(args, accelerator):
 
     # Define worker initialization function for DataLoader
     def worker_init_fn(worker_id):
-        # Each worker needs a different seed
-        worker_seed = args.seed + worker_id + accelerator.process_index * 1000
-        # Set the random seeds for each worker
+        # Each worker needs a different seed derived from process-specific seed
+        process_seed = args.seed + accelerator.process_index * 1000
+        worker_seed = process_seed + worker_id
+
+        # Initialize all random number generators
         import random
         import numpy as np
         random.seed(worker_seed)
         np.random.seed(worker_seed)
         torch.manual_seed(worker_seed)
-        # Note: torch.cuda.manual_seed is not set here as workers typically use CPU
+        # Note: No need to set CUDA seed in workers
 
-    # Configure data loader with proper RNG handling
+        logger.debug(f"Worker {worker_id} on process {accelerator.process_index} using seed {worker_seed}")
+
+    # Configure DataLoader with proper process and worker-specific seeding
     if accelerator.num_processes > 1:
         # Create a deterministic distributed sampler
         train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -626,7 +642,7 @@ def train_with_accelerate(args, accelerator):
             num_replicas=accelerator.num_processes,
             rank=accelerator.process_index,
             shuffle=True,
-            seed=args.seed,
+            seed=args.seed,  # Use the global seed for shuffling
             drop_last=False
         )
 
@@ -634,10 +650,10 @@ def train_with_accelerate(args, accelerator):
             train_dataset,
             batch_size=args.batch_size,
             collate_fn=data_collator,
-            num_workers=args.num_workers,  # Use appropriate number of workers
+            num_workers=args.num_workers,
             pin_memory=torch.cuda.is_available(),
             sampler=train_sampler,
-            worker_init_fn=worker_init_fn  # Initialize workers with different seeds
+            worker_init_fn=worker_init_fn
         )
     else:
         # Single-process mode
@@ -646,9 +662,9 @@ def train_with_accelerate(args, accelerator):
             batch_size=args.batch_size,
             collate_fn=data_collator,
             shuffle=True,
-            num_workers=args.num_workers,  # Use appropriate number of workers
+            num_workers=args.num_workers,
             pin_memory=torch.cuda.is_available(),
-            worker_init_fn=worker_init_fn  # Initialize workers with different seeds
+            worker_init_fn=worker_init_fn
         )
 
     # Prepare optimizer
@@ -690,12 +706,13 @@ def train_with_accelerate(args, accelerator):
     is_distributed = accelerator.num_processes > 1
     has_sampler = is_distributed  # True if we're using a DistributedSampler
 
-    # Prepare with accelerator - DDP kwargs should be properly set from setup_accelerator
+    # Prepare with accelerator
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, lr_scheduler
     )
 
-    # Generate test sequences for extrapolation testing
+    # IMPORTANT: Generate test sequences for extrapolation testing with synchronized seed
+    # We do this after accelerator.prepare but before tests to ensure consistency
     test_lengths = [
         args.pre_training_length,
         args.pre_training_length * 2,
@@ -704,12 +721,24 @@ def train_with_accelerate(args, accelerator):
     if args.max_inference_length:
         test_lengths.append(args.max_inference_length)
 
-    extrapolation_test_seqs = generate_test_sequences(test_lengths)
+    # For the extrapolation test, we'll use a fixed seed to generate the same
+    # sequences on all processes to avoid synchronization issues during testing
+    extrapolation_test_seed = 12345  # A fixed seed just for generating test sequences
 
-    # Test initial extrapolation
+    # Only generate the test sequences on the main process
     if accelerator.is_main_process:
+        # Temporarily set a fixed seed
+        saved_state = random.getstate()
+        random.seed(extrapolation_test_seed)
+        extrapolation_test_seqs = generate_test_sequences(test_lengths)
+        random.setstate(saved_state)  # Restore original random state
+
+        # Test initial extrapolation (only on main process)
         logger.info("\nInitial length extrapolation test:")
         test_sequence_length_extrapolation(accelerator, model, tokenizer, extrapolation_test_seqs)
+
+    # Sync before continuing
+    accelerator.wait_for_everyone()
 
     # Resume from checkpoint if needed
     starting_epoch, completed_steps = resume_from_checkpoint(accelerator, args, num_update_steps_per_epoch)
@@ -729,7 +758,7 @@ def train_with_accelerate(args, accelerator):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {max_train_steps}")
     logger.info(f"  Using distributed sampler: {has_sampler}")
-    logger.info(f"  RNG synchronization: enabled for [torch, cuda, numpy, python]")
+    logger.info(f"  RNG strategy: Process-specific seeds with manual control")
     logger.info(f"  Global seed: {args.seed}")
 
     # Setup progress bar (only on main process)
@@ -742,7 +771,7 @@ def train_with_accelerate(args, accelerator):
         total_loss = 0
         valid_steps = 0  # Count successful steps for averaging
 
-        # Set epoch for distributed sampler
+        # Set epoch for distributed sampler - crucially important for proper shuffling
         if has_sampler and hasattr(train_dataloader, "sampler") and hasattr(train_dataloader.sampler, "set_epoch"):
             train_dataloader.sampler.set_epoch(epoch)
             logger.info(f"Set epoch {epoch} for distributed sampler")
@@ -830,7 +859,15 @@ def train_with_accelerate(args, accelerator):
 
             # Final length extrapolation test
             logger.info("\nFinal length extrapolation test:")
-            test_sequence_length_extrapolation(gpu_accelerator, test_model, tokenizer, extrapolation_test_seqs)
+
+            # Use the same sequences we generated earlier for consistent testing
+            # This avoids RNG synchronization issues
+            saved_state = random.getstate()
+            random.seed(extrapolation_test_seed)
+            test_seqs = generate_test_sequences(test_lengths)
+            random.setstate(saved_state)
+
+            test_sequence_length_extrapolation(gpu_accelerator, test_model, tokenizer, test_seqs)
     except Exception as e:
         logger.error(f"Error during final model saving or testing: {e}")
         logger.exception("Detailed traceback:")  # Print full traceback for debugging
@@ -919,20 +956,19 @@ def setup_accelerator(args):
     if torch.cuda.is_available():
         device_placement_config = {"device_map": "auto"}
 
-    # Create accelerator with properly enabled RNG synchronization
+    # IMPORTANT: Disable RNG synchronization to prevent collective mismatches
+    # We'll handle RNG manually instead
     accelerator_config = {
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "project_config": project_config,
         "device_placement": device_placement_config,
         "kwargs_handlers": [ddp_kwargs],  # Use kwargs_handlers for latest Accelerate
-        # Enable RNG synchronization with specified types
-        "rng_types": ["torch", "cuda", "numpy", "python"],
     }
 
     if hasattr(args, 'log_with_tensorboard') and args.log_with_tensorboard:
         accelerator_config["log_with"] = "tensorboard"
 
-    # Create accelerator
+    # Create accelerator with disabled RNG synchronization
     accelerator = Accelerator(**accelerator_config)
 
     # Report accelerator configuration
@@ -942,8 +978,8 @@ def setup_accelerator(args):
     logger.info(f"  Process index: {accelerator.process_index}")
     logger.info(f"  Device: {accelerator.device}")
     logger.info(f"  Mixed precision: {accelerator.mixed_precision}")
-    logger.info(f"  RNG synchronization: enabled for {accelerator_config['rng_types']}")
     logger.info(f"  DDP kwargs: find_unused_parameters=True, static_graph=False")
+    logger.info(f"  RNG synchronization: manually controlled")
 
     # Check SDPA support
     if torch.cuda.is_available():
