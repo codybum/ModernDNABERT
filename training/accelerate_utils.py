@@ -606,8 +606,19 @@ def train_with_accelerate(args, accelerator):
         max_seq_length=args.pre_training_length  # Pass pre_training_length to collator
     )
 
-    # Configure data loader - THIS IS THE KEY CHANGE FOR FIXING RNG ISSUES
-    # Using a deterministic sampler instead of relying on Accelerate's RNG sync
+    # Define worker initialization function for DataLoader
+    def worker_init_fn(worker_id):
+        # Each worker needs a different seed
+        worker_seed = args.seed + worker_id + accelerator.process_index * 1000
+        # Set the random seeds for each worker
+        import random
+        import numpy as np
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+        # Note: torch.cuda.manual_seed is not set here as workers typically use CPU
+
+    # Configure data loader with proper RNG handling
     if accelerator.num_processes > 1:
         # Create a deterministic distributed sampler
         train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -623,9 +634,10 @@ def train_with_accelerate(args, accelerator):
             train_dataset,
             batch_size=args.batch_size,
             collate_fn=data_collator,
-            num_workers=0,  # Avoid worker processes to prevent RNG issues
+            num_workers=args.num_workers,  # Use appropriate number of workers
             pin_memory=torch.cuda.is_available(),
-            sampler=train_sampler
+            sampler=train_sampler,
+            worker_init_fn=worker_init_fn  # Initialize workers with different seeds
         )
     else:
         # Single-process mode
@@ -634,8 +646,9 @@ def train_with_accelerate(args, accelerator):
             batch_size=args.batch_size,
             collate_fn=data_collator,
             shuffle=True,
-            num_workers=0,  # Avoid worker processes to prevent RNG issues
-            pin_memory=torch.cuda.is_available()
+            num_workers=args.num_workers,  # Use appropriate number of workers
+            pin_memory=torch.cuda.is_available(),
+            worker_init_fn=worker_init_fn  # Initialize workers with different seeds
         )
 
     # Prepare optimizer
@@ -682,11 +695,6 @@ def train_with_accelerate(args, accelerator):
         model, optimizer, train_dataloader, lr_scheduler
     )
 
-    # CRITICAL FIX: If dataloader has rng_types, disable it to prevent synchronization issues
-    if hasattr(train_dataloader, "rng_types"):
-        train_dataloader.rng_types = []
-        logger.info("Disabled RNG synchronization in DataLoader to prevent 'Invalid mt19937 state' errors")
-
     # Generate test sequences for extrapolation testing
     test_lengths = [
         args.pre_training_length,
@@ -721,7 +729,8 @@ def train_with_accelerate(args, accelerator):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {max_train_steps}")
     logger.info(f"  Using distributed sampler: {has_sampler}")
-    logger.info(f"  RNG synchronization: disabled (to fix 'Invalid mt19937 state' errors)")
+    logger.info(f"  RNG synchronization: enabled for [torch, cuda, numpy, python]")
+    logger.info(f"  Global seed: {args.seed}")
 
     # Setup progress bar (only on main process)
     progress_bar = tqdm(range(max_train_steps), disable=not accelerator.is_main_process)
@@ -834,7 +843,6 @@ def train_with_accelerate(args, accelerator):
     if accelerator.is_main_process:
         logger.info("Training completed, performing final cleanup")
 
-
 def prepare_alibi_model_for_ddp(model):
     """
     Prepare an ALiBi model for DDP by handling unused position embeddings.
@@ -911,12 +919,14 @@ def setup_accelerator(args):
     if torch.cuda.is_available():
         device_placement_config = {"device_map": "auto"}
 
-    # Create accelerator with explicit DDP kwargs
+    # Create accelerator with properly enabled RNG synchronization
     accelerator_config = {
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "project_config": project_config,
         "device_placement": device_placement_config,
         "kwargs_handlers": [ddp_kwargs],  # Use kwargs_handlers for latest Accelerate
+        # Enable RNG synchronization with specified types
+        "rng_types": ["torch", "cuda", "numpy", "python"],
     }
 
     if hasattr(args, 'log_with_tensorboard') and args.log_with_tensorboard:
@@ -925,12 +935,6 @@ def setup_accelerator(args):
     # Create accelerator
     accelerator = Accelerator(**accelerator_config)
 
-    # Explicitly disable RNG state synchronization in the state object
-    if hasattr(accelerator, 'state'):
-        if hasattr(accelerator.state, 'sync_rng_states'):
-            accelerator.state.sync_rng_states = False
-            logger.info("Disabled RNG state synchronization to prevent 'Invalid mt19937 state' errors")
-
     # Report accelerator configuration
     logger.info(f"Accelerator configuration:")
     logger.info(f"  Distributed type: {accelerator.distributed_type}")
@@ -938,6 +942,7 @@ def setup_accelerator(args):
     logger.info(f"  Process index: {accelerator.process_index}")
     logger.info(f"  Device: {accelerator.device}")
     logger.info(f"  Mixed precision: {accelerator.mixed_precision}")
+    logger.info(f"  RNG synchronization: enabled for {accelerator_config['rng_types']}")
     logger.info(f"  DDP kwargs: find_unused_parameters=True, static_graph=False")
 
     # Check SDPA support
@@ -952,7 +957,6 @@ def setup_accelerator(args):
         logger.info("  SDPA will use CPU implementation")
 
     return accelerator
-
 
 def calculate_training_steps(train_dataloader, gradient_accumulation_steps, num_epochs):
     """Calculate the number of update steps for training."""
@@ -1062,8 +1066,31 @@ def resume_from_checkpoint(accelerator, args, num_update_steps_per_epoch):
     # Log checkpoint info
     logger.info(f"Resuming from checkpoint: {checkpoint_path}")
 
-    # Load checkpoint state
-    accelerator.load_state(checkpoint_path)
+    # Load checkpoint state with proper RNG handling
+    try:
+        # First try loading with RNG states
+        accelerator.load_state(checkpoint_path)
+        logger.info("Successfully loaded checkpoint including RNG states")
+    except RuntimeError as e:
+        if "RNG state" in str(e):
+            logger.warning(f"Failed to load RNG states from checkpoint: {e}")
+            logger.warning("Trying to load checkpoint without RNG states")
+            # Try loading without RNG states
+            accelerator.load_state(checkpoint_path, load_rng_state=False)
+            logger.info("Successfully loaded checkpoint without RNG states")
+
+            # Reset RNG with process-specific seeds
+            process_seed = args.seed + accelerator.process_index * 100
+            import random
+            import numpy as np
+            random.seed(process_seed)
+            np.random.seed(process_seed)
+            torch.manual_seed(process_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(process_seed)
+        else:
+            # Re-raise if it's not related to RNG states
+            raise
 
     # Extract epoch and step from checkpoint path
     path = Path(checkpoint_path)
@@ -1081,7 +1108,6 @@ def resume_from_checkpoint(accelerator, args, num_update_steps_per_epoch):
         torch.cuda.synchronize()
 
     return starting_epoch, completed_steps
-
 
 def save_model(accelerator, model, tokenizer, output_dir):
     """Save the model and tokenizer using Accelerate with improved robustness for distributed training."""

@@ -125,6 +125,10 @@ def main():
                                          "constant_with_warmup"],
                                 help="LR scheduler type (default: linear)")
 
+    # Add deterministic training option
+    training_group.add_argument("--deterministic", action="store_true",
+                                help="Enable deterministic algorithms for reproducibility")
+
     # Logging and checkpointing
     logging_group = parser.add_argument_group("Logging and Checkpointing")
     logging_group.add_argument("--logging_steps", type=int, default=100,
@@ -161,6 +165,14 @@ def main():
     else:
         # Don't use ALiBi with standard attention
         args.use_alibi = False
+
+    # If deterministic training is enabled, set PyTorch to use deterministic algorithms
+    if hasattr(args, 'deterministic') and args.deterministic:
+        logger.info("Enabling deterministic algorithms for reproducibility")
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        torch.use_deterministic_algorithms(True)
 
     # Configure Accelerate first
     accelerator = setup_accelerator(args)
@@ -215,7 +227,6 @@ def main():
 
     # Start training with Accelerate
     train_with_accelerate(args, accelerator)
-
 
 if __name__ == "__main__":
     main()
