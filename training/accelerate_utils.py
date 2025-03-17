@@ -676,6 +676,15 @@ def train_with_accelerate(args, accelerator):
         train_dataloader, args.gradient_accumulation_steps, args.epochs
     )
 
+    # FIX: Log the correct number of steps per epoch and total dataset size
+    if accelerator.is_main_process:
+        logger.info(f"Dataset size: {len(train_dataset)} sequences")
+        logger.info(f"Batch size per GPU: {args.batch_size}")
+        logger.info(
+            f"Total batch size across all {accelerator.num_processes} GPUs: {args.batch_size * accelerator.num_processes}")
+        logger.info(f"Steps per epoch: {num_update_steps_per_epoch}")
+        logger.info(f"Total training steps for {args.epochs} epochs: {max_train_steps}")
+
     # Setup learning rate scheduler
     lr_scheduler = get_scheduler(
         name=args.lr_scheduler_type,
@@ -722,6 +731,9 @@ def train_with_accelerate(args, accelerator):
     # Compute total training batch size
     total_batch_size = args.batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
+    # Add option for epoch checkpoint frequency
+    epoch_checkpoint_freq = getattr(args, 'epoch_checkpoint_freq', 1)  # Default to 1 for backward compatibility
+
     # Log training information
     logger.info("***** Running training *****")
     logger.info(f"  Attention type = {args.attention_type}")
@@ -735,6 +747,7 @@ def train_with_accelerate(args, accelerator):
     logger.info(f"  Total optimization steps = {max_train_steps}")
     logger.info(f"  Using distributed sampler: {has_sampler}")
     logger.info(f"  RNG synchronization: disabled (using process-specific seeds)")
+    logger.info(f"  Epoch checkpoint frequency: every {epoch_checkpoint_freq} epochs")
 
     # IMPORTANT: Skip the initial extrapolation test in distributed context
     # We'll do testing at the end of training instead
@@ -744,16 +757,20 @@ def train_with_accelerate(args, accelerator):
     progress_bar = tqdm(range(max_train_steps), disable=not accelerator.is_main_process)
     progress_bar.update(completed_steps)
 
-    # Main training loop
-    for epoch in range(starting_epoch, args.epochs):
+    # FIX: Initialize the real_epoch counter based on completed steps
+    real_epoch_float = completed_steps / num_update_steps_per_epoch
+    real_epoch = int(real_epoch_float)  # Integer part
+
+    # Main training loop - FIX: change to use step-based approach for epochs
+    for step_epoch in range(starting_epoch, args.epochs):
         model.train()
         total_loss = 0
         valid_steps = 0  # Count successful steps for averaging
 
         # Set epoch for distributed sampler
         if has_sampler and hasattr(train_dataloader, "sampler") and hasattr(train_dataloader.sampler, "set_epoch"):
-            train_dataloader.sampler.set_epoch(epoch)
-            logger.info(f"Set epoch {epoch} for distributed sampler")
+            train_dataloader.sampler.set_epoch(step_epoch)
+            logger.info(f"Set dataloader epoch {step_epoch} for distributed sampler")
 
         # Process batches with improved error handling
         for step, batch in enumerate(train_dataloader):
@@ -780,32 +797,49 @@ def train_with_accelerate(args, accelerator):
                     progress_bar.update(1)
                     completed_steps += 1
 
+                    # FIX: Calculate the real epoch based on steps
+                    real_epoch_float = completed_steps / num_update_steps_per_epoch
+                    new_real_epoch = int(real_epoch_float)
+
+                    # When we cross a real epoch boundary, log it
+                    if new_real_epoch > real_epoch:
+                        real_epoch = new_real_epoch
+                        logger.info(f"Completed real epoch {real_epoch} ({real_epoch_float:.2f})")
+
+                        # Only save a checkpoint on epoch boundaries if we're at the checkpoint frequency
+                        if real_epoch % epoch_checkpoint_freq == 0:
+                            # Save real-epoch based checkpoint
+                            save_checkpoint(
+                                accelerator, args, real_epoch, completed_steps,
+                                model, optimizer, lr_scheduler, tokenizer
+                            )
+
                     # Log loss periodically
                     if completed_steps % args.logging_steps == 0 and valid_steps > 0:
                         avg_loss = total_loss.item() / valid_steps
-                        logger.info(f"Epoch: {epoch}, Step: {completed_steps}, Loss: {avg_loss:.4f}")
+                        # FIX: Include real epoch in logs
+                        logger.info(
+                            f"Real Epoch: {real_epoch_float:.2f}, Step: {completed_steps}, Loss: {avg_loss:.4f}")
                         total_loss = 0
                         valid_steps = 0
 
-                    # Save checkpoint if needed
+                    # Save step-based checkpoint if needed
                     if args.checkpointing_steps is not None and completed_steps % args.checkpointing_steps == 0:
                         save_checkpoint(
-                            accelerator, args, epoch, completed_steps,
+                            accelerator, args, real_epoch, completed_steps,
                             model, optimizer, lr_scheduler, tokenizer
                         )
             else:
                 # Error in this batch - skip and continue
-                logger.warning(f"Skipping problematic batch at Epoch {epoch}, Step {step}")
+                logger.warning(f"Skipping problematic batch at Step {completed_steps}")
                 # Explicit synchronization
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                     torch.cuda.empty_cache()
 
-        # Save checkpoint after each epoch
-        save_checkpoint(
-            accelerator, args, epoch, completed_steps,
-            model, optimizer, lr_scheduler, tokenizer
-        )
+        # FIX: Don't save a checkpoint after each step_epoch
+        # This eliminates the original checkpoint at the end of each original "epoch" loop
+        # We've already saved at real epoch boundaries above
 
     # We're done with distributed training, save the final model
     if accelerator.is_main_process:
