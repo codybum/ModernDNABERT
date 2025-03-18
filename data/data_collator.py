@@ -95,14 +95,8 @@ class GenomicDataset(Dataset):
 
     def _load_sequences(self, file_paths: List[str]) -> List[str]:
         """
-        Load genomic sequences from files - supports both FASTA format and
-        plain text with one sequence per line.
-
-        Args:
-            file_paths: List of file paths
-
-        Returns:
-            List of sequences
+        Load genomic sequences from files - supports FASTA format and plain text.
+        Now accepts ATGCN rather than just ATGC.
         """
         sequences = []
         total_files = 0
@@ -113,11 +107,9 @@ class GenomicDataset(Dataset):
             total_files += 1
 
             with open(file_path, 'r') as f:
-                # Read the first few lines to detect format
+                # Detect format
                 peek = [next(f, '').strip() for _ in range(5)]
                 f.seek(0)  # Reset to beginning
-
-                # Check if any line starts with '>' - indicating FASTA format
                 is_fasta = any(line.startswith('>') for line in peek if line)
 
                 if is_fasta:
@@ -132,21 +124,21 @@ class GenomicDataset(Dataset):
                                 sequences.append(current_seq)
                                 current_seq = ""
                             continue
-                        # Only accept A, T, G, C sequences
-                        if set(line.upper()) <= set('ATGC'):
+                        # Updated: Accept A, T, G, C, and N sequences
+                        if set(line.upper()) <= set('ATGCN'):
                             current_seq += line.upper()
 
                     # Add the last sequence if exists
                     if current_seq:
                         sequences.append(current_seq)
                 else:
-                    logger.info(f"Detected plain text format (one sequence per line) for {file_path}")
+                    logger.info(f"Detected plain text format for {file_path}")
                     # Process as plain text with one sequence per line
                     for line in f:
                         line = line.strip()
                         if line:  # Skip empty lines
-                            # Filter to only keep A, T, G, C characters
-                            filtered_seq = ''.join(c for c in line.upper() if c in 'ATGC')
+                            # Updated: Filter to keep A, T, G, C, and N characters
+                            filtered_seq = ''.join(c for c in line.upper() if c in 'ATGCN')
                             if filtered_seq:
                                 sequences.append(filtered_seq)
 
@@ -236,15 +228,7 @@ class GenomicDataset(Dataset):
         return len(self.chunks)
 
     def __getitem__(self, idx):
-        """
-        Get a tokenized sequence with appropriate length handling.
-
-        Args:
-            idx: Index of the chunk
-
-        Returns:
-            Tokenized sequence
-        """
+        """Get a tokenized sequence with appropriate length handling."""
         try:
             sequence = self.chunks[idx]
 
@@ -258,8 +242,8 @@ class GenomicDataset(Dataset):
                 sequence = sequence[start:start + very_long_threshold]
                 logger.debug(f"Truncated very long sequence from original length to {very_long_threshold}")
 
-            # Filter the sequence to only include valid characters
-            sequence = ''.join(c for c in sequence.upper() if c in 'ATGC')
+            # Updated: Filter the sequence to include ATGCN
+            sequence = ''.join(c for c in sequence.upper() if c in 'ATGCN')
 
             # Check if sequence is empty after filtering
             if not sequence:
@@ -274,9 +258,6 @@ class GenomicDataset(Dataset):
                 max_length=max_seq_length,  # Use pre_training_length as max length
                 return_tensors='pt'
             )
-
-            # Remove the batch dimension added by return_tensors='pt'
-            encoding = {k: v.squeeze(0) for k, v in encoding.items()}
 
             # Ensure we have token_type_ids
             if 'token_type_ids' not in encoding:

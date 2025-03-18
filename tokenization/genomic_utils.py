@@ -61,23 +61,22 @@ def ensure_special_tokens(tokenizer):
 
 def filter_genomic_sequence(sequence: str) -> str:
     """
-    Filter a genomic sequence to only contain valid DNA characters (ATGC).
+    Filter a genomic sequence to only contain valid DNA characters (ATGCN).
 
     Args:
         sequence: DNA sequence to filter
 
     Returns:
-        Filtered sequence with only ATGC characters
+        Filtered sequence with only ATGCN characters
     """
     # Validate sequence
     sequence = sequence.upper()
-    invalid_chars = set(sequence) - set('ATGC')
+    invalid_chars = set(sequence) - set('ATGCN')
     if invalid_chars:
         logger.warning(f"Sequence contains invalid characters: {invalid_chars}")
 
-    # Filter out non-ATGC characters
-    return ''.join(c for c in sequence if c in 'ATGC')
-
+    # Filter out non-ATGCN characters
+    return ''.join(c for c in sequence if c in 'ATGCN')
 
 def tokenize_genomic_sequence(tokenizer, sequence: str, max_length=None, **kwargs):
     """
