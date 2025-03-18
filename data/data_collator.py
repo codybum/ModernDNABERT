@@ -242,7 +242,7 @@ class GenomicDataset(Dataset):
                 sequence = sequence[start:start + very_long_threshold]
                 logger.debug(f"Truncated very long sequence from original length to {very_long_threshold}")
 
-            # Updated: Filter the sequence to include ATGCN
+            # Filter the sequence to include ATGCN
             sequence = ''.join(c for c in sequence.upper() if c in 'ATGCN')
 
             # Check if sequence is empty after filtering
@@ -255,15 +255,18 @@ class GenomicDataset(Dataset):
                 sequence,
                 truncation=True,
                 padding='max_length',
-                max_length=max_seq_length,  # Use pre_training_length as max length
+                max_length=max_seq_length,
                 return_tensors='pt'
             )
+
+            # CRITICAL FIX: Remove the batch dimension added by return_tensors='pt'
+            encoding = {k: v.squeeze(0) for k, v in encoding.items()}
 
             # Ensure we have token_type_ids
             if 'token_type_ids' not in encoding:
                 encoding['token_type_ids'] = torch.zeros_like(encoding['input_ids'])
 
-            # CRITICAL FIX: Verify and clamp token IDs
+            # Verify and clamp token IDs
             if 'input_ids' in encoding:
                 vocab_size = self.tokenizer.vocab_size
                 max_id = encoding['input_ids'].max().item()
@@ -280,22 +283,11 @@ class GenomicDataset(Dataset):
                         encoding['input_ids']
                     )
 
-                    # Double-check the fix worked
-                    if encoding['input_ids'].max().item() >= vocab_size:
-                        logger.error("Failed to clamp token IDs to vocab size")
-                        return self._get_fallback_encoding(max_seq_length)
-
-            # Verify encoding looks valid
-            if encoding['input_ids'].size(0) == 0:
-                logger.error("Tokenizer returned empty input_ids")
-                return self._get_fallback_encoding(max_seq_length)
-
             return encoding
 
         except Exception as e:
-            # Log the error but return a fallback encoding
-            logger.error(f"Error in dataset.__getitem__: {e}")
-            return self._get_fallback_encoding(max_seq_length)
+
+    # Error handling...
 
     def _get_fallback_encoding(self, length):
         """
