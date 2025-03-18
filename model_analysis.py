@@ -446,168 +446,126 @@ def analyze_alibi_slopes(slopes, output_dir):
 
 def run_full_model_analysis(model, output_dir):
     """
-    Run full model analysis using WeightWatcher with version compatibility.
+    Run full model analysis using WeightWatcher with correct API usage.
 
     Args:
         model: PyTorch model
         output_dir: Directory to save results
 
     Returns:
-        DataFrame with analysis results or None if failed
+        Analysis results or None if failed
     """
     try:
         logger.info("Running full model analysis with Weight Watcher")
 
-        # Try different API versions
+        # Configure matplotlib to use non-interactive backend to avoid displaying plots
+        import matplotlib
+        original_backend = matplotlib.get_backend()
+        matplotlib.use('Agg')  # Use non-interactive backend
+
+        # Create a WeightWatcher instance with the model
+        watcher = ww.WeightWatcher(model=model)
+
+        # Run the analysis with plots saved but not displayed
+        # min_evals=50 is recommended for power law fits
+        details = watcher.analyze(min_evals=50, plot=True, savefig=True)
+
+        # Restore original backend
+        matplotlib.use(original_backend)
+
+        # Save the detailed results
+        if hasattr(details, 'to_csv'):
+            details.to_csv(os.path.join(output_dir, "weight_watcher_details.csv"))
+        elif isinstance(details, dict):
+            pd.DataFrame.from_dict(details).to_csv(os.path.join(output_dir, "weight_watcher_details.csv"))
+
+        # Get and save the summary
         try:
-            # Version-specific approaches
-
-            # Try newer API first
-            analyzer = ww.WeightWatcher(model=model)
-            ww_results = analyzer.analyze()
-
-            # Try to generate a summary
-            try:
-                if hasattr(analyzer, 'get_summary'):
-                    summary = analyzer.get_summary()
-                    with open(os.path.join(output_dir, "ww_summary.txt"), "w") as f:
-                        f.write(str(summary))
-            except Exception as e:
-                logger.warning(f"Failed to generate summary: {e}")
-
-            # Try to generate plots - different method names in different versions
-            try:
-                for plot_method in ['plot', 'plot_details', 'details_plot']:
-                    if hasattr(analyzer, plot_method):
-                        plot_func = getattr(analyzer, plot_method)
-                        try:
-                            fig = plot_func()
-                            fig.savefig(os.path.join(output_dir, f"ww_{plot_method}.png"), dpi=300)
-                            plt.close(fig)
-                            logger.info(f"Created plot using {plot_method}")
-                            break
-                        except Exception as plot_err:
-                            logger.warning(f"Failed with {plot_method}: {plot_err}")
-            except Exception as e:
-                logger.warning(f"All plotting methods failed: {e}")
-
-            return ww_results
-
+            summary = watcher.get_summary(details)
+            with open(os.path.join(output_dir, "weight_watcher_summary.txt"), "w") as f:
+                f.write(str(summary))
         except Exception as e:
-            logger.warning(f"First API approach failed: {e}")
+            logger.warning(f"Failed to get summary: {e}")
 
-            # Try older API
-            try:
-                analyzer = ww.WeightWatcher()
-                ww_results = analyzer.analyze_model(model)
+        # Save ESD (Eigenvalue Spectrum Distribution) data if available
+        try:
+            esd = watcher.get_ESD()
+            if esd is not None:
+                if hasattr(esd, 'to_csv'):
+                    esd.to_csv(os.path.join(output_dir, "eigenvalue_spectrum.csv"))
+                elif isinstance(esd, dict):
+                    pd.DataFrame.from_dict(esd).to_csv(os.path.join(output_dir, "eigenvalue_spectrum.csv"))
+        except Exception as e:
+            logger.warning(f"Failed to get ESD: {e}")
 
-                # Save results
-                if isinstance(ww_results, pd.DataFrame):
-                    ww_results.to_csv(os.path.join(output_dir, "full_model_analysis.csv"))
-                else:
-                    with open(os.path.join(output_dir, "full_model_analysis.txt"), "w") as f:
-                        f.write(str(ww_results))
-
-                return ww_results
-
-            except Exception as e2:
-                logger.warning(f"Second API approach failed: {e2}")
-
-                # Final attempt - get state_dict and analyze each matrix
-                try:
-                    logger.info("Attempting direct analysis of model weights")
-                    state_dict = model.state_dict()
-                    matrices = []
-                    matrix_names = []
-
-                    for name, param in state_dict.items():
-                        if 'weight' in name and param.dim() >= 2:
-                            matrices.append(param.detach().cpu().numpy())
-                            matrix_names.append(name)
-
-                    # Analyze with our most generic approach
-                    results = []
-                    for i, matrix in enumerate(matrices):
-                        result = analyze_weight_matrix(matrix)
-                        if isinstance(result, dict):
-                            result['name'] = matrix_names[i]
-                            results.append(result)
-
-                    if results:
-                        ww_results = pd.DataFrame(results)
-                        ww_results.to_csv(os.path.join(output_dir, "full_model_analysis.csv"))
-                        return ww_results
-
-                except Exception as e3:
-                    logger.warning(f"All API approaches failed: {e3}")
-
-                    # Ultimate fallback: Try direct SVD analysis
-                    try:
-                        logger.info("Attempting direct SVD analysis")
-                        from scipy import stats
-                        import numpy as np
-
-                        results = []
-                        state_dict = model.state_dict()
-
-                        for name, param in state_dict.items():
-                            if 'weight' in name and param.dim() >= 2:
-                                weight = param.detach().cpu().numpy()
-
-                                if min(weight.shape) > 5:  # Need enough dimensions
-                                    # Get singular values
-                                    s = np.linalg.svd(weight, compute_uv=False)
-
-                                    # Sort in descending order
-                                    s = np.sort(s)[::-1]
-
-                                    # Remove zeros and very small values
-                                    s = s[s > 1e-10]
-
-                                    if len(s) > 5:  # Need enough points for regression
-                                        # Log-log transform for power-law fit
-                                        log_s = np.log(s)
-                                        log_rank = np.log(np.arange(1, len(s) + 1))
-
-                                        # Linear regression on log-log data
-                                        slope, intercept, r_value, p_value, std_err = stats.linregress(log_rank, log_s)
-
-                                        # The power-law exponent is the negative slope
-                                        alpha = -slope
-
-                                        results.append({
-                                            'name': name,
-                                            'alpha': alpha,
-                                            'r_squared': r_value ** 2,
-                                            'shape': str(weight.shape),
-                                            'norm': np.linalg.norm(weight)
-                                        })
-
-                        if results:
-                            # Convert to DataFrame
-                            svd_df = pd.DataFrame(results)
-                            svd_df.to_csv(os.path.join(output_dir, "svd_analysis.csv"))
-
-                            # Create a simple visualization
-                            plt.figure(figsize=(12, 8))
-                            plt.scatter(svd_df['alpha'], np.log(svd_df['norm']))
-                            plt.xlabel('Power-Law Exponent (α)')
-                            plt.ylabel('Log Weight Norm')
-                            plt.title('SVD-Based Power-Law Analysis')
-                            plt.tight_layout()
-                            plt.savefig(os.path.join(output_dir, "svd_analysis.png"), dpi=300)
-                            plt.close()
-
-                            logger.info(f"SVD analysis complete with {len(results)} matrices")
-                            return svd_df
-
-                    except Exception as e4:
-                        logger.warning(f"SVD analysis failed: {e4}")
-
-                    return None
+        return details
 
     except Exception as e:
-        logger.warning(f"Full model analysis failed: {e}")
+        logger.warning(f"WeightWatcher analysis failed: {e}")
+
+        # If everything fails, fall back to our direct SVD method
+        try:
+            logger.info("Falling back to direct SVD analysis")
+            from scipy import stats
+            import numpy as np
+
+            results = []
+            state_dict = model.state_dict()
+
+            for name, param in state_dict.items():
+                if 'weight' in name and param.dim() >= 2:
+                    weight = param.detach().cpu().numpy()
+
+                    if min(weight.shape) > 5:  # Need enough dimensions
+                        # Get singular values
+                        s = np.linalg.svd(weight, compute_uv=False)
+
+                        # Sort in descending order
+                        s = np.sort(s)[::-1]
+
+                        # Remove zeros and very small values
+                        s = s[s > 1e-10]
+
+                        if len(s) > 5:  # Need enough points for regression
+                            # Log-log transform for power-law fit
+                            log_s = np.log(s)
+                            log_rank = np.log(np.arange(1, len(s) + 1))
+
+                            # Linear regression on log-log data
+                            slope, intercept, r_value, p_value, std_err = stats.linregress(log_rank, log_s)
+
+                            # The power-law exponent is the negative slope
+                            alpha = -slope
+
+                            results.append({
+                                'name': name,
+                                'alpha': alpha,
+                                'r_squared': r_value ** 2,
+                                'shape': str(weight.shape),
+                                'norm': np.linalg.norm(weight)
+                            })
+
+            if results:
+                # Convert to DataFrame
+                svd_df = pd.DataFrame(results)
+                svd_df.to_csv(os.path.join(output_dir, "svd_analysis.csv"))
+
+                # Create a simple visualization
+                plt.figure(figsize=(12, 8))
+                plt.scatter(svd_df['alpha'], np.log(svd_df['norm']))
+                plt.xlabel('Power-Law Exponent (α)')
+                plt.ylabel('Log Weight Norm')
+                plt.title('SVD-Based Power-Law Analysis')
+                plt.tight_layout()
+                plt.savefig(os.path.join(output_dir, "svd_analysis.png"), dpi=300)
+                plt.close()
+
+                logger.info(f"SVD analysis complete with {len(results)} matrices")
+                return svd_df
+
+        except Exception as e4:
+            logger.warning(f"SVD analysis failed: {e4}")
+
         return None
 
 
@@ -914,10 +872,7 @@ def run_ww_analysis(model, output_dir):
         global alibi_slopes_global
         alibi_slopes_global = alibi_slopes
 
-        # 2. Analyze layer weights
-        layer_results = analyze_layer_weights(layer_weights, output_dir)
-
-        # 3. Analyze ALiBi slopes if present
+        # 2. Analyze ALiBi slopes if present
         slope_results = None
         if alibi_slopes:
             try:
@@ -925,18 +880,18 @@ def run_ww_analysis(model, output_dir):
             except Exception as e:
                 logger.warning(f"Failed to analyze ALiBi slopes: {e}")
 
-        # 4. Run full model analysis using Weight Watcher
-        run_full_model_analysis(model, output_dir)
+        # 3. Run full model analysis using Weight Watcher
+        details = run_full_model_analysis(model, output_dir)
 
-        # 5. Generate visualizations
+        # 4. Generate visualizations for ALiBi slopes
         try:
-            generate_visualizations(layer_results, slope_results, output_dir)
+            generate_alibi_visualizations(slope_results, output_dir)
         except Exception as e:
-            logger.warning(f"Failed to generate visualizations: {e}")
+            logger.warning(f"Failed to generate ALiBi visualizations: {e}")
 
-        # 6. Generate interpretation and recommendations
+        # 5. Generate interpretation and recommendations
         try:
-            generate_interpretation(layer_results, slope_results, is_alibi_model_flag, output_dir)
+            generate_interpretation_from_details(details, slope_results, is_alibi_model_flag, output_dir)
         except Exception as e:
             logger.warning(f"Failed to generate interpretation: {e}")
 
@@ -945,6 +900,202 @@ def run_ww_analysis(model, output_dir):
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         raise
+
+
+def generate_alibi_visualizations(slope_results, output_dir):
+    """
+    Generate visualizations specifically for ALiBi slopes.
+
+    Args:
+        slope_results: DataFrame with ALiBi slope analysis
+        output_dir: Directory to save visualizations
+    """
+    if slope_results is None or slope_results.empty:
+        logger.info("No ALiBi slope results to visualize")
+        return
+
+    logger.info("Generating ALiBi visualizations")
+
+    # ALiBi slopes bar chart
+    try:
+        plt.figure(figsize=(12, 6))
+        plt.bar(slope_results['layer'], slope_results['mean_slope'], yerr=slope_results['std_slope'])
+        plt.title("ALiBi Slopes Across Layers")
+        plt.xlabel("Layer")
+        plt.ylabel("Average Slope Value")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "alibi_slopes.png"), dpi=300)
+        plt.close()
+        logger.info(f"Created ALiBi slopes plot: {os.path.join(output_dir, 'alibi_slopes.png')}")
+
+        # Slope distribution across all layers
+        if 'alibi_slopes_global' in globals() and alibi_slopes_global:
+            try:
+                all_slopes = np.concatenate([slopes for layer, slopes in alibi_slopes_global.items()])
+                plt.figure(figsize=(10, 6))
+                sns.histplot(all_slopes, kde=True)
+                plt.title("Distribution of ALiBi Slopes Across All Layers")
+                plt.xlabel("Slope Value")
+                plt.ylabel("Frequency")
+                plt.savefig(os.path.join(output_dir, "alibi_slope_distribution.png"), dpi=300)
+                plt.close()
+                logger.info(
+                    f"Created ALiBi slope distribution plot: {os.path.join(output_dir, 'alibi_slope_distribution.png')}")
+            except Exception as e:
+                logger.warning(f"Failed to create ALiBi slope distribution plot: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to create ALiBi visualizations: {e}")
+
+
+def generate_interpretation_from_details(details, slope_results, is_alibi, output_dir):
+    """
+    Generate interpretation of Weight Watcher results using details data.
+
+    Args:
+        details: Results from WeightWatcher analysis
+        slope_results: DataFrame with ALiBi slope analysis
+        is_alibi: Boolean indicating if the model uses ALiBi
+        output_dir: Directory to save interpretation
+    """
+    logger.info("Generating interpretation from Weight Watcher details")
+
+    # Define optimal alpha value ranges for sequence models
+    optimal_ranges = {
+        'min': 2.0,  # Values below suggest poor generalization
+        'good': 2.5,  # Target value for good generalization
+        'max': 3.5  # Values above suggest memorization
+    }
+
+    # Process the details to extract alpha values
+    overall_avg = np.nan
+    attention_avg = np.nan
+    ff_avg = np.nan
+
+    try:
+        # Try to extract data from details object
+        if details is not None:
+            if hasattr(details, 'alpha'):
+                # If details is a single object with alpha attribute
+                overall_avg = details.alpha
+            elif isinstance(details, pd.DataFrame) and 'alpha' in details.columns:
+                # If details is a DataFrame with alpha column
+                overall_avg = details['alpha'].mean()
+
+                # Try to separate attention and feedforward components
+                attention_rows = details.index.str.contains('attention|query|key|value', case=False)
+                ff_rows = details.index.str.contains('intermediate|output', case=False)
+
+                if attention_rows.any():
+                    attention_avg = details.loc[attention_rows, 'alpha'].mean()
+                if ff_rows.any():
+                    ff_avg = details.loc[ff_rows, 'alpha'].mean()
+            elif isinstance(details, dict) and 'alpha' in details:
+                # If details is a dictionary with alpha key
+                overall_avg = details['alpha']
+    except Exception as e:
+        logger.warning(f"Failed to extract alpha values from details: {e}")
+
+    # Generate interpretation report
+    with open(os.path.join(output_dir, "interpretation.txt"), "w") as f:
+        f.write("WEIGHT WATCHER ANALYSIS INTERPRETATION\n")
+        f.write("=====================================\n\n")
+
+        f.write("OVERALL MODEL ASSESSMENT:\n")
+        if not np.isnan(overall_avg):
+            f.write(f"Average Power-Law Exponent (α): {overall_avg:.3f}\n")
+
+            if not np.isnan(attention_avg) and not np.isnan(ff_avg):
+                f.write(f"  - Attention Components α: {attention_avg:.3f}\n")
+                f.write(f"  - Feedforward Components α: {ff_avg:.3f}\n")
+
+            # Interpretation of alpha values
+            if overall_avg < optimal_ranges['min']:
+                f.write("\nALERT: Model shows signs of UNDERFITTING (α too low)\n")
+                f.write("- May struggle to capture complex genomic patterns\n")
+                f.write("- Consider longer training or larger model\n")
+            elif overall_avg > optimal_ranges['max']:
+                f.write("\nALERT: Model shows signs of OVERFITTING (α too high)\n")
+                f.write("- May memorize training data rather than generalize\n")
+                f.write("- Consider more regularization or reducing model size\n")
+            else:
+                f.write("\nGOOD: Model appears well-balanced for generalization\n")
+                f.write("- Power-law exponent is in the optimal range for generalization\n")
+                f.write("- Model should handle novel genomic sequences well\n")
+
+            # Difference between attention and feedforward components
+            if not np.isnan(attention_avg) and not np.isnan(ff_avg):
+                diff = abs(attention_avg - ff_avg)
+                if diff > 0.5:
+                    f.write(f"\nNOTE: Large difference ({diff:.2f}) between attention and feedforward components\n")
+                    if attention_avg > ff_avg:
+                        f.write("- Attention layers appear to be stronger than feedforward layers\n")
+                        f.write("- Model may focus more on sequence relationships than feature extraction\n")
+                    else:
+                        f.write("- Feedforward layers appear stronger than attention layers\n")
+                        f.write("- Model may focus more on feature extraction than sequence relationships\n")
+        else:
+            f.write("Could not determine power-law exponents for this model.\n")
+            f.write("This may be due to the specific architecture or insufficient data.\n")
+
+        # ALiBi-specific analysis
+        if is_alibi and slope_results is not None and not slope_results.empty:
+            f.write("\nALiBi ATTENTION ANALYSIS:\n")
+
+            avg_slope = slope_results['mean_slope'].mean()
+            avg_std = slope_results['std_slope'].mean()
+
+            f.write(f"Average ALiBi slope: {avg_slope:.4f}\n")
+            f.write(f"Average slope variation: {avg_std:.4f}\n\n")
+
+            if avg_std > 0.5:
+                f.write("HIGH SLOPE VARIATION: Model has diverse attention patterns across heads\n")
+                f.write("- Good for handling different types of genomic sequences\n")
+                f.write("- Expect good performance on varied sequence lengths\n")
+            else:
+                f.write("LOW SLOPE VARIATION: Model has similar attention patterns across heads\n")
+                f.write("- May struggle with diverse genomic sequences\n")
+                f.write("- Consider modifying attention head initialization\n")
+
+        f.write("\nGENOMIC BERT-SPECIFIC CONSIDERATIONS:\n")
+        f.write("- Power-law behavior is crucial for genome sequence generalization\n")
+        f.write("- ALiBi attention requires specific weight structure for extrapolation\n")
+        f.write("- Genomic models benefit from careful balance between memorization and generalization\n")
+
+    # Generate actionable recommendations
+    with open(os.path.join(output_dir, "recommendations.txt"), "w") as f:
+        f.write("ACTIONABLE RECOMMENDATIONS\n")
+        f.write("=========================\n\n")
+
+        if not np.isnan(overall_avg):
+            if overall_avg < optimal_ranges['min']:
+                f.write("1. INCREASE TRAINING TIME: Your model appears to be underfitting\n")
+                f.write("2. CHECK DATA QUALITY: Ensure genomic sequences are properly preprocessed\n")
+                f.write("3. INCREASE MODEL CAPACITY: Consider more attention heads or larger hidden size\n")
+            elif overall_avg > optimal_ranges['max']:
+                f.write("1. ADD REGULARIZATION: Try adding dropout to attention layers\n")
+                f.write("2. REDUCE MODEL SIZE: Your model may be too complex for your dataset\n")
+                f.write("3. ADD MORE TRAINING DATA: Diverse genomic examples will help generalization\n")
+            else:
+                f.write("1. MAINTAIN CURRENT ARCHITECTURE: Your model shows good balance\n")
+                f.write("2. FINE-TUNE SELECT LAYERS: Focus on layers with extreme α values\n")
+                f.write("3. CONSIDER PRUNING: Some attention heads may be redundant\n")
+        else:
+            f.write("1. CONSIDER MANUAL EVALUATION: Standard metrics may be more informative\n")
+            f.write("2. BENCHMARK ON DOMAINS: Test performance on specific genomic tasks\n")
+            f.write("3. OPTIMIZE HYPERPARAMETERS: Adjust learning rates and regularization\n")
+
+        # Add genomic-specific recommendations
+        f.write("\nGENOMIC-SPECIFIC RECOMMENDATIONS:\n")
+        f.write("1. BENCHMARK ON VARIABLE LENGTH SEQUENCES: Test extrapolation capabilities\n")
+        f.write("2. EVALUATE ON REVERSE COMPLEMENT SEQUENCES: Check biological consistency\n")
+        f.write("3. TEST WITH AMBIGUOUS NUCLEOTIDES: Ensure robustness to sequence variations\n")
+
+        if is_alibi:
+            f.write("\nALiBi-SPECIFIC RECOMMENDATIONS:\n")
+            f.write("1. VERIFY EXTRAPOLATION: Test on sequences 2-4x longer than training length\n")
+            f.write("2. CHECK ATTENTION SLOPES: Ensure proper distribution for genomic data\n")
+            f.write("3. CONSIDER ALIBI TUNING: Adjust slope initialization based on sequence properties\n")
 
 
 def main():
@@ -970,6 +1121,13 @@ def main():
     logger.info("=" * 80)
     logger.info(f"Model path: {args.model_path}")
     logger.info(f"Output directory: {args.output_dir}")
+
+    # Check WeightWatcher version
+    try:
+        ww_version = ww.__version__ if hasattr(ww, '__version__') else "Unknown"
+        logger.info(f"WeightWatcher version: {ww_version}")
+    except:
+        logger.warning("Could not determine WeightWatcher version")
 
     try:
         # Load model
