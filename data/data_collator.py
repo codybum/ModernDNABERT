@@ -250,17 +250,18 @@ class GenomicDataset(Dataset):
                 logger.warning("Empty sequence after filtering. Using dummy sequence.")
                 sequence = "ATGC" * 32  # Use a dummy sequence
 
-            # Use the tokenizer directly with proper truncation and padding
+            # PROPER FIX: Don't request PyTorch tensors from the tokenizer
+            # Let the collator handle tensor conversion with proper batching
             encoding = self.tokenizer(
                 sequence,
                 truncation=True,
                 padding='max_length',
                 max_length=max_seq_length,
-                return_tensors='pt'
+                return_tensors=None  # Return Python lists instead of tensors
             )
 
-            # CRITICAL FIX: Remove the batch dimension added by return_tensors='pt'
-            encoding = {k: v.squeeze(0) for k, v in encoding.items()}
+            # Convert to tensors manually with correct shape
+            encoding = {k: torch.tensor(v) for k, v in encoding.items()}
 
             # Ensure we have token_type_ids
             if 'token_type_ids' not in encoding:
@@ -286,8 +287,8 @@ class GenomicDataset(Dataset):
             return encoding
 
         except Exception as e:
-
-    # Error handling...
+            logger.error(f"Error in dataset.__getitem__: {e}")
+            return self._get_fallback_encoding(max_seq_length)
 
     def _get_fallback_encoding(self, length):
         """
